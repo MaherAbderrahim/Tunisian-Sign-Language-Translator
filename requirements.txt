@@ -1,0 +1,31 @@
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+pillow>=10.0.0
+
+# MediaPipe for hand landmarks
+mediapipe>=0.10.0
+
+# ML utilities
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# API and Web
+fastapi>=0.100.0
+uvicorn>=0.23.0
+streamlit>=1.28.0
+
+# Needed by scripts/download_data.py (HTTP dataset download)
+requests>=2.31.0
+
+# Needed by web/app.py (dataframe display)
+pandas>=2.0.0
+
+# Needed by API test client
+httpx>=0.24.0
+
+# Offline translation backend (no API key, no network at inference time)
+argostranslate>=1.9.0
