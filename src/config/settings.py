@@ -73,3 +73,66 @@ MEDIAPIPE_HAND_LANDMARKER_URL = (
 
 # Default trained checkpoint path
 DEFAULT_MODEL_PATH = MODELS_DIR / "best_model.pth"
+
+# ============================================================================
+# V2 — Continuous sign recognition (additive only, never touches V1 imports)
+# ============================================================================
+# These are used by `src/preprocessing/*`, `src/models/continuous/*`,
+# `src/continuous_translation/*` and `scripts/{gen_synthetic_landmarks,
+# train_continuous}.py`. They do NOT modify any V1 behavior.
+
+# V2 data layout (real OR synthetic sequences live here)
+CONTINUOUS_DATA_DIR = DATA_DIR / "continuous"
+CONTINUOUS_LANDMARKS_DIR = CONTINUOUS_DATA_DIR / "landmarks"
+CONTINUOUS_VIDEOS_DIR = CONTINUOUS_DATA_DIR / "videos"
+CONTINUOUS_METADATA_FILE = CONTINUOUS_DATA_DIR / "metadata.csv"
+CONTINUOUS_MODELS_DIR = MODELS_DIR / "continuous"
+
+# Synthetic mini-benchmark (for technical validation of the V2 pipeline only).
+# These are NOT real LST phrases: sequences are built by sampling/repeating
+# single-sign landmarks from W7CH (still images, not video). Their purpose
+# is to verify the temporal architecture works end-to-end on a controlled
+# problem. Performance on this benchmark must NOT be presented as LST phrase
+# recognition results.
+SYNTHETIC_BENCHMARK_VOCAB = [
+    "bou",     # Famille / père
+    "om",      # Famille / mère
+    "labes",   # Demandes / bien
+    "non",     # Demandes / non
+    "oui",     # Demandes / oui
+    "dar",     # Destinations / maison
+    "thnin",   # Jours / lundi
+    "mar7ba",  # Demandes / bienvenue
+]
+SYNTHETIC_BENCHMARK_NUM_SPEAKERS = 5        # 5 pseudo-speakers from W7CH pool
+SYNTHETIC_BENCHMARK_SEQ_LENGTHS = [3, 5, 7, 10]
+SYNTHETIC_BENCHMARK_SAMPLES_PER_SLICE = 15  # 8 signs * 5 speakers * 4 lengths * 15 = 2400 sequences
+
+# Temporal model defaults (V2)
+TEMPORAL_INPUT_DIM = 126         # Hand landmarks (21 * 2 hands * 3 coords) — matches V1
+TEMPORAL_HIDDEN_DIM = 128
+TEMPORAL_NUM_LAYERS = 2
+TEMPORAL_DROPOUT = 0.3
+TEMPORAL_BIDIRECTIONAL = True
+
+# Continuous training defaults (V2)
+CONTINUOUS_BATCH_SIZE = 16
+CONTINUOUS_LEARNING_RATE = 1e-3
+CONTINUOUS_NUM_EPOCHS = 40
+CONTINUOUS_EARLY_STOP_PATIENCE = 8
+CONTINUOUS_LABEL_SMOOTHING = 0.1
+
+# UNKNOWN / confidence threshold for continuous predictions
+CONTINUOUS_CONFIDENCE_THRESHOLD = 0.5
+
+# V1 -> sequence temporal smoothing (when reusing V1 per-frame)
+V1_SEQUENCE_SMOOTHING_WINDOW = 5  # majority vote window in frames
+
+# Make sure V2 directories exist (additive — V1 dirs already created above)
+for _dir in [
+    CONTINUOUS_DATA_DIR,
+    CONTINUOUS_LANDMARKS_DIR,
+    CONTINUOUS_VIDEOS_DIR,
+    CONTINUOUS_MODELS_DIR,
+]:
+    _dir.mkdir(parents=True, exist_ok=True)
