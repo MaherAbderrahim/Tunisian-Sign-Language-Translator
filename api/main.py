@@ -11,10 +11,13 @@ Security / correctness fixes vs the original:
 """
 
 import os
+import json
+import asyncio
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, List
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -28,18 +31,35 @@ from src.translation.translator import (
     translate_text_to_tsl,
 )
 from src.languages.dictionary import TSLDictionary
+from src.languages.alphabet import TSLAlphabet
 from src.config.settings import MAX_UPLOAD_BYTES
+
+
+# Global translator instance (initialized on startup)
+translator: Optional[TSLTranslator] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize translator on startup, cleanup on shutdown."""
+    global translator
+    translator = TSLTranslator()
+    print("TSL Translator initialized")
+    yield
+    if translator and hasattr(translator, 'close'):
+        await translator.close()
 
 
 # Create FastAPI app
 app = FastAPI(
     title="TSL Translator API",
     description="Tunisian Sign Language (W7CH dataset) to Dialect Translation API",
-    version="2.0.0",
+    version="3.0.0",
+    lifespan=lifespan,
 )
 
 # CORS — configurable via env, safe defaults
-_default_origins = "http://localhost:8501,http://127.0.0.1:8501"
+_default_origins = "http://localhost:8501,http://127.0.0.1:8501,http://localhost:3000,http://127.0.0.1:3000"
 _cors_env = os.environ.get("TSL_CORS_ORIGINS", _default_origins)
 _cors_origins = [
     o.strip() for o in _cors_env.split(",") if o.strip()
@@ -52,9 +72,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Global translator instance (initialized on startup)
-translator: Optional[TSLTranslator] = None
 
 
 class TranslationResponse(BaseModel):
@@ -85,14 +102,6 @@ class TextTranslationResponse(BaseModel):
     english: Optional[str] = None
     arabic: Optional[str] = None
     category: Optional[str] = None
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize translator on startup."""
-    global translator
-    translator = TSLTranslator()
-    print("TSL Translator initialized")
 
 
 @app.get("/")
@@ -323,6 +332,189 @@ async def clear_history():
         raise HTTPException(status_code=503, detail="Translator not initialized")
     translator.clear_history()
     return {"message": "History cleared"}
+
+
+# ── Alphabet / Finger Spelling ──
+
+@app.get("/alphabet/labels")
+async def get_alphabet_labels():
+    """Get all TSL alphabet labels for finger spelling."""
+    alphabet = TSLAlphabet()
+    labels = list(alphabet.sign_to_index.keys())
+    return {"labels": labels, "count": len(labels)}
+
+
+@app.get("/alphabet/{label}")
+async def get_alphabet_translation(label: str):
+    """Get translation for an alphabet label."""
+    alphabet = TSLAlphabet()
+    result = alphabet.get_translations(label)
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Alphabet label '{label}' not found")
+    return result
+
+
+# ── LLM Configuration ──
+
+class LLMConfigRequest(BaseModel):
+    provider: str = "openrouter"
+    api_key: str = ""
+    model: str = ""
+    base_url: str = ""
+
+
+@app.get("/llm/config")
+async def get_llm_config():
+    """Get current LLM corrector configuration."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    return translator.get_llm_config()
+
+
+@app.post("/llm/config")
+async def set_llm_config(request: LLMConfigRequest):
+    """Configure the LLM corrector (provider, API key, model)."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    translator.configure_llm(
+        provider=request.provider,
+        api_key=request.api_key,
+        model=request.model,
+        base_url=request.base_url,
+    )
+    return {"message": "LLM configured", "config": translator.get_llm_config()}
+
+
+@app.post("/llm/correct")
+async def correct_with_llm(request: TextTranslationRequest):
+    """Correct a text using the configured LLM."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    corrected = await translator.correct_with_llm(request.text)
+    return {"raw": request.text, "corrected": corrected}
+
+
+# ── Mode Controller ──
+
+@app.get("/mode")
+async def get_mode():
+    """Get current translation mode (sign/spell)."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    return translator.get_mode_state()
+
+
+@app.post("/mode/toggle")
+async def toggle_mode():
+    """Toggle between sign and spell mode."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    new_mode = translator.toggle_mode()
+    return {"mode": new_mode, "state": translator.get_mode_state()}
+
+
+@app.post("/spell/flush")
+async def flush_spell():
+    """Flush the spell assembler and return the assembled sentence."""
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    sentence = translator.flush_spell()
+    return {"sentence": sentence}
+
+
+# ── WebSocket for real-time camera ──
+
+@app.websocket("/ws/camera")
+async def websocket_camera(websocket: WebSocket):
+    """
+    WebSocket endpoint for real-time camera translation.
+
+    Client sends: base64-encoded JPEG frames
+    Server sends: translation results as JSON
+
+    Protocol:
+      - Client connects
+      - Client sends JSON: {"frame": "<base64>", "mode": "sign"|"spell"}
+      - Server responds: {"type": "translation", "data": {...}}
+      - Client can send: {"action": "toggle_mode"}
+      - Client can send: {"action": "flush_spell"}
+      - Client can send: {"action": "clear_history"}
+    """
+    await websocket.accept()
+    if translator is None:
+        await websocket.send_json({"type": "error", "message": "Translator not initialized"})
+        await websocket.close()
+        return
+
+    try:
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+
+            if msg.get("action") == "toggle_mode":
+                new_mode = translator.toggle_mode()
+                await websocket.send_json({
+                    "type": "mode_changed",
+                    "data": translator.get_mode_state(),
+                })
+                continue
+
+            if msg.get("action") == "flush_spell":
+                sentence = translator.flush_spell()
+                await websocket.send_json({
+                    "type": "spell_flushed",
+                    "data": {"sentence": sentence},
+                })
+                continue
+
+            if msg.get("action") == "clear_history":
+                translator.clear_history()
+                await websocket.send_json({"type": "history_cleared"})
+                continue
+
+            if msg.get("action") == "correct":
+                raw = msg.get("text", "")
+                corrected = await translator.correct_with_llm(raw)
+                await websocket.send_json({
+                    "type": "corrected",
+                    "data": {"raw": raw, "corrected": corrected},
+                })
+                continue
+
+            # Default: process frame
+            frame_b64 = msg.get("frame")
+            if not frame_b64:
+                await websocket.send_json({"type": "error", "message": "No frame provided"})
+                continue
+
+            # Decode base64 frame
+            import base64
+            try:
+                frame_bytes = base64.b64decode(frame_b64)
+                nparr = np.frombuffer(frame_bytes, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if frame is None:
+                    await websocket.send_json({"type": "error", "message": "Invalid frame"})
+                    continue
+            except Exception:
+                await websocket.send_json({"type": "error", "message": "Failed to decode frame"})
+                continue
+
+            # Run inference in threadpool
+            result = await run_in_threadpool(translator.translate_frame, frame)
+
+            await websocket.send_json({
+                "type": "translation",
+                "data": result,
+            })
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

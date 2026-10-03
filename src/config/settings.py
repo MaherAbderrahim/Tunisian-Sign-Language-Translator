@@ -136,3 +136,52 @@ for _dir in [
     CONTINUOUS_MODELS_DIR,
 ]:
     _dir.mkdir(parents=True, exist_ok=True)
+
+# ============================================================================
+# Finger Spelling — Alphabet TSL
+# ============================================================================
+# 28 Arabic letters + 10 digits = 38 classes for finger spelling.
+ALPHABET_NUM_CLASSES = 31  # 28 Arabic letters + Space + Backspace + Finish
+ALPHABET_INPUT_SIZE = 126  # Same as V1: 2 hands × 21 landmarks × 3 coords
+
+# Data paths for alphabet dataset
+ALPHABET_DATA_DIR = DATA_DIR / "alphabet"
+ALPHABET_RAW_DIR = ALPHABET_DATA_DIR / "raw"
+ALPHABET_PROCESSED_DIR = ALPHABET_DATA_DIR / "processed"
+ALPHABET_MODELS_DIR = MODELS_DIR / "alphabet"
+
+# HaGRID dataset (source for alphabet gestures)
+HAGRID_DATASET_URL = "https://www.kaggle.com/datasets/inktracking/hagrid"
+HAGRID_DATA_DIR = RAW_DATA_DIR / "hagrid"
+
+# Training settings for spell classifier
+SPELL_BATCH_SIZE = 32
+SPELL_LEARNING_RATE = 0.001
+SPELL_NUM_EPOCHS = 100
+SPELL_EARLY_STOP_PATIENCE = 15
+SPELL_LABEL_SMOOTHING = 0.1
+
+# Spell assembler settings
+SPELL_GAP_FRAMES = 8  # consecutive empty frames to finalize current word
+
+# Mode controller settings (existing TSL signs repurposed as mode toggles)
+SPELL_ON_SIGN = "ta3raf"   # "tu connais" → enter spell mode
+SPELL_OFF_SIGN = "labes"   # "bien" → exit spell mode
+
+# Classes with no training data (MediaPipe fails to detect hands in their images)
+# These classes exist in the dictionary but the model cannot recognize them.
+UNSUPPORTED_SIGN_CLASSES = ["ta3raf", "karhba", "metro", "train"]
+
+# Multi-task model settings (Version B)
+MULTITASK_NUM_SIGN_CLASSES = NUM_CLASSES  # 57
+MULTITASK_NUM_SPELL_CLASSES = ALPHABET_NUM_CLASSES  # 31
+MULTITASK_BACKBONE_DIM = 128
+
+# Make sure alphabet directories exist
+for _dir in [
+    ALPHABET_DATA_DIR,
+    ALPHABET_RAW_DIR,
+    ALPHABET_PROCESSED_DIR,
+    ALPHABET_MODELS_DIR,
+]:
+    _dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,2 @@
+model,params,test_acc,macro_f1
+legacy_best_model,903097,0.5919165580182529,0.5165295399373893

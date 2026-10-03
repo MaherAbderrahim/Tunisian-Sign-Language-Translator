@@ -1,0 +1,40 @@
+{
+  "dataset": "ArSL-31-Pilot",
+  "samples": 7665,
+  "num_classes": 31,
+  "splits": {
+    "train": 6263,
+    "val": 701,
+    "test": 701
+  },
+  "models": [
+    {
+      "name": "mlp",
+      "test_acc": 1.0,
+      "test_f1": 1.0,
+      "test_loss": 0.6526925884367906,
+      "params": 235039,
+      "size_mb": 0.913874626159668,
+      "latency_ms": 0.29595136642456055
+    },
+    {
+      "name": "bigru",
+      "test_acc": 0.9957203994293866,
+      "test_f1": 0.9954595850271898,
+      "test_loss": 0.6839108203515176,
+      "params": 528032,
+      "size_mb": 2.0252580642700195,
+      "latency_ms": 1.0129928588867188
+    },
+    {
+      "name": "transformer",
+      "test_acc": 1.0,
+      "test_f1": 1.0,
+      "test_loss": 0.710031743736648,
+      "params": 81311,
+      "size_mb": 0.3258237838745117,
+      "latency_ms": 0.5668520927429199
+    }
+  ],
+  "best_model": "mlp"
+}

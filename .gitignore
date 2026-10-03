@@ -142,3 +142,11 @@ Desktop.ini
 gh_login_*.txt
 logs_*.txt
 training_log.txt
+*.log
+
+# Experiment data (large, regenerable)
+*.npz
+data/alphabet/*.csv
+
+# Pytest
+.pytest_cache/

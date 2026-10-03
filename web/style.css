@@ -1,0 +1,231 @@
+/* ── Base ── */
+:root {
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --danger: #dc2626;
+    --danger-hover: #b91c1c;
+    --bg: #0f172a;
+    --bg-card: #1e293b;
+    --bg-input: #334155;
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --border: #475569;
+    --success: #22c55e;
+    --warning: #f59e0b;
+    --radius: 8px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+}
+
+header {
+    text-align: center;
+    padding: 24px 16px 12px;
+    border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 1.5rem; font-weight: 700; }
+header p { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
+
+main {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 16px;
+}
+
+/* ── Status Bar ── */
+.status-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    margin-bottom: 16px;
+    font-size: 0.85rem;
+}
+.status {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 0.75rem;
+}
+.status.connected { background: var(--success); color: #000; }
+.status.disconnected { background: var(--danger); color: #fff; }
+.mode { color: var(--warning); font-weight: 600; }
+
+/* ── Tabs ── */
+.tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 16px;
+}
+.tab {
+    flex: 1;
+    padding: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+}
+.tab:hover { border-color: var(--primary); color: var(--text); }
+.tab.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Buttons ── */
+.btn {
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+.btn:hover { border-color: var(--primary); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-danger:hover { background: var(--danger-hover); }
+.btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+
+/* ── Camera ── */
+.camera-layout { display: flex; flex-direction: column; gap: 12px; }
+.video-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 4/3;
+    background: #000;
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+.video-container video, .video-container canvas {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+}
+.video-container canvas { pointer-events: none; }
+.placeholder {
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--text-muted);
+    text-align: center;
+}
+.controls { display: flex; gap: 8px; }
+
+/* ── Upload ── */
+.upload-area {
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 40px;
+    text-align: center;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: border-color 0.2s;
+}
+.upload-area:hover { border-color: var(--primary); }
+.upload-area p { margin: 8px 0; }
+.preview { margin-top: 16px; text-align: center; }
+.preview img, .preview video { max-width: 100%; border-radius: var(--radius); }
+.progress { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--text-muted); }
+.spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--primary);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Settings ── */
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.setting-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+}
+.setting-card h3 { font-size: 1rem; margin-bottom: 12px; }
+.form-group { margin-bottom: 12px; }
+.form-group label { display: block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 4px; }
+.form-group input, .form-group select {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 0.85rem;
+}
+.form-group input:focus, .form-group select:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+.setting-status {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    color: var(--success);
+}
+
+/* ── Output ── */
+.output-section { margin-top: 20px; }
+.output-section h2 { font-size: 1rem; margin-bottom: 8px; }
+.translation-box {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+}
+.translation-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+}
+.translation-row:last-child { border-bottom: none; }
+.translation-row label { font-size: 0.8rem; color: var(--text-muted); min-width: 90px; }
+.translation-row.corrected .output-text { color: var(--success); font-weight: 600; }
+.output-text { font-size: 0.9rem; }
+
+/* ── History ── */
+.history-section { margin-top: 20px; }
+.history-section h2 { font-size: 1rem; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.history-list {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+.history-item {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+    display: flex;
+    justify-content: space-between;
+}
+.history-item:last-child { border-bottom: none; }
+.history-item .time { color: var(--text-muted); font-size: 0.75rem; }
+.empty { color: var(--text-muted); text-align: center; padding: 16px; font-size: 0.85rem; }
+
+/* ── Responsive ── */
+@media (max-width: 600px) {
+    .settings-grid { grid-template-columns: 1fr; }
+    .controls { flex-wrap: wrap; }
+}
