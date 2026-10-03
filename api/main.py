@@ -5,17 +5,32 @@ Security / correctness fixes vs the original:
   - CORS: allow_origins is configurable via env (TSL_CORS_ORIGINS) and
     defaults to an explicit list; `allow_credentials` only set if origins are
     not "*".
-  - Upload size limit: MAX_UPLOAD_BYTES enforced in /translate/frame.
-  - Inference is run in a threadpool to avoid blocking the event loop.
-  - History is already bounded in TSLTranslator (HISTORY_MAX_LEN).
+  - POST /llm/config: optional admin token (TSL_ADMIN_TOKEN) + strict
+    base_url validation performed by LLMConfig.validate() (SSRF guard).
+  - Per-client sessions (X-Session-Id header; one session per WebSocket) so
+    concurrent clients never share history, mode or smoothing state.
+  - Upload size limits enforced while streaming (never buffer past the cap).
+  - Inference is run in a threadpool to avoid blocking the event loop; heavy
+    offline-translation endpoints are plain `def` so Starlette runs them in
+    its threadpool.
+  - History is bounded per session (HISTORY_MAX_LEN).
+  - Simple in-memory rate limiting on the LLM endpoints.
 """
 
 import os
 import json
-import asyncio
+import time
+import uuid
+import base64
+import secrets
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, List
-from pathlib import Path
+
+try:  # optional dependency; .env loading is a convenience only
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,18 +40,19 @@ from pydantic import BaseModel
 import numpy as np
 import cv2
 
-from src.translation.translator import (
-    TSLTranslator,
-    translate_tsl_to_text,
-    translate_text_to_tsl,
-)
-from src.languages.dictionary import TSLDictionary
+from src.translation.translator import TSLTranslator, get_shared_dictionary
+from src.translation.translator_backend import get_default_translator
 from src.languages.alphabet import TSLAlphabet
 from src.config.settings import MAX_UPLOAD_BYTES
 
 
 # Global translator instance (initialized on startup)
 translator: Optional[TSLTranslator] = None
+
+SESSION_HEADER = "X-Session-Id"
+MAX_TEXT_CHARS = 4000          # cap for /llm/correct and text inputs
+MAX_WS_MSG_BYTES = 6_000_000   # ~4.5 MB decoded JPEG + JSON overhead
+VIDEO_MAX_BYTES = 50 * 1024 * 1024
 
 
 @asynccontextmanager
@@ -74,6 +90,71 @@ app.add_middleware(
 )
 
 
+# ── Helpers ─────────────────────────────────────────────────────────────
+
+def _session_id(request: Request) -> str:
+    """Session taken from the X-Session-Id header (or the shared default)."""
+    sid = (request.headers.get(SESSION_HEADER) or "").strip()
+    return sid[:64] if sid else "default"
+
+
+def _require_admin(request: Request) -> None:
+    """Guard state-changing endpoints when TSL_ADMIN_TOKEN is configured."""
+    token = os.environ.get("TSL_ADMIN_TOKEN", "")
+    if not token:
+        return  # auth disabled (local-dev default); SSRF guard still applies
+    provided = request.headers.get("X-Admin-Token", "")
+    if not secrets.compare_digest(provided.encode(), token.encode()):
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Admin-Token")
+
+
+_rate_hits: Dict[str, List[float]] = {}
+_RATE_WINDOW_S = 60.0
+
+
+def _rate_limit(request: Request, bucket: str, limit: int) -> None:
+    """Minimal in-memory per-IP sliding-window rate limit."""
+    ip = request.client.host if request.client else "unknown"
+    key = f"{bucket}:{ip}"
+    now = time.monotonic()
+    hits = [t for t in _rate_hits.get(key, ()) if now - t < _RATE_WINDOW_S]
+    if len(hits) >= limit:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Rate limit exceeded ({limit} requests/min for {bucket})",
+        )
+    hits.append(now)
+    _rate_hits[key] = hits
+    if len(_rate_hits) > 512:
+        _rate_hits.clear()  # crude but bounded
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """Stream-read an upload, aborting as soon as the cap is exceeded."""
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large (max {cap // (1024 * 1024)} MB)",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _require_translator() -> TSLTranslator:
+    if translator is None:
+        raise HTTPException(status_code=503, detail="Translator not initialized")
+    return translator
+
+
+# ── Models ──────────────────────────────────────────────────────────────
+
 class TranslationResponse(BaseModel):
     """Translation response model"""
     tsl: Optional[str] = None
@@ -101,15 +182,19 @@ class TextTranslationResponse(BaseModel):
     french: Optional[str] = None
     english: Optional[str] = None
     arabic: Optional[str] = None
+    arabic_msa: Optional[str] = None
     category: Optional[str] = None
+    target_lang: str = "french"
 
+
+# ── Core endpoints ──────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
     """Root endpoint"""
     return {
         "message": "TSL Translator API",
-        "version": "2.0.0",
+        "version": app.version,
         "docs": "/docs",
     }
 
@@ -122,23 +207,18 @@ async def health_check():
 
 
 @app.post("/translate/frame", response_model=TranslationResponse)
-async def translate_frame(file: UploadFile = File(...)):
+async def translate_frame(request: Request, file: UploadFile = File(...)):
     """
     Translate a single frame (image).
 
-    Accepts JPEG/PNG up to MAX_UPLOAD_BYTES. Inference runs in a threadpool
-    so the event loop stays responsive.
+    Accepts JPEG/PNG up to MAX_UPLOAD_BYTES (enforced while streaming).
+    Inference runs in a threadpool so the event loop stays responsive.
+    Pass an optional X-Session-Id header to isolate smoothing/history.
     """
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
+    tr = _require_translator()
+    sid = _session_id(request)
 
-    # Enforce upload size limit while reading
-    contents = await file.read()
-    if len(contents) > MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large (max {MAX_UPLOAD_BYTES // (1024*1024)} MB)",
-        )
+    contents = await _read_capped(file, MAX_UPLOAD_BYTES)
 
     nparr = np.frombuffer(contents, np.uint8)
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
@@ -146,7 +226,7 @@ async def translate_frame(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Invalid image format")
 
     # Run CPU-bound inference in a thread (don't block the loop)
-    result = await run_in_threadpool(translator.translate_frame, frame)
+    result = await run_in_threadpool(tr.translate_frame, frame, session_id=sid)
 
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
@@ -157,6 +237,7 @@ async def translate_frame(file: UploadFile = File(...)):
         french=result.get("french"),
         english=result.get("english"),
         arabic=result.get("arabic"),
+        arabic_msa=result.get("arabic_msa"),
         category=result.get("category"),
         confidence=result.get("confidence", 0.0),
         rejected=result.get("rejected", False),
@@ -166,7 +247,9 @@ async def translate_frame(file: UploadFile = File(...)):
 @app.post("/translate/text", response_model=TextTranslationResponse)
 async def translate_text(request: TextTranslationRequest):
     """Translate text between TSL and other languages."""
-    dictionary = TSLDictionary()
+    if len(request.text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=f"text too long (max {MAX_TEXT_CHARS} chars)")
+    dictionary = get_shared_dictionary()
 
     # Try as TSL label first
     result = dictionary.get_all_translations(request.text)
@@ -180,6 +263,7 @@ async def translate_text(request: TextTranslationRequest):
             arabic=result.get('arabic'),
             arabic_msa=result.get('arabic_msa'),
             category=result.get('category'),
+            target_lang=request.target_lang,
         )
 
     # Try as Tunisian dialect (case-insensitive)
@@ -195,9 +279,10 @@ async def translate_text(request: TextTranslationRequest):
             arabic=result.get('arabic'),
             arabic_msa=result.get('arabic_msa'),
             category=result.get('category'),
+            target_lang=request.target_lang,
         )
 
-    return TextTranslationResponse(input=request.text)
+    return TextTranslationResponse(input=request.text, target_lang=request.target_lang)
 
 
 class MultiTranslateRequest(BaseModel):
@@ -208,14 +293,21 @@ class MultiTranslateRequest(BaseModel):
 
 
 @app.post("/translate/multi")
-async def translate_multi(request: MultiTranslateRequest):
+def translate_multi(request: MultiTranslateRequest):
     """Translate arbitrary text to multiple target languages via offline Argos.
 
     source_lang: 'french', 'english', 'arabic', 'tunisian', 'spanish',
                   'german' etc. 'tunisian' is mapped to 'ar' for translation.
+
+    Declared as `def` (not async): offline translation is CPU-bound, so
+    Starlette runs it in its threadpool instead of blocking the event loop.
     """
-    from src.translation.translator_backend import OfflineTranslator
-    translator_be = OfflineTranslator()
+    if len(request.text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=f"text too long (max {MAX_TEXT_CHARS} chars)")
+    if len(request.target_langs) > 10:
+        raise HTTPException(status_code=400, detail="Too many target languages (max 10)")
+
+    translator_be = get_default_translator()
     out = {}
     for lang in request.target_langs:
         out[lang] = translator_be.translate(request.text, request.source_lang, lang)
@@ -227,15 +319,17 @@ async def translate_multi(request: MultiTranslateRequest):
 
 
 @app.get("/translate/languages")
-async def list_languages():
-    """List languages available for offline translation."""
-    from src.translation.translator_backend import OfflineTranslator
-    translator_be = OfflineTranslator()
-    return {"languages": translator_be.available_languages()}
+def list_languages():
+    """List languages available for offline translation.
+
+    Declared as `def`: runs in the server threadpool.
+    """
+    return {"languages": get_default_translator().available_languages()}
 
 
 @app.post("/translate/video")
 async def translate_video(
+    request: Request,
     file: UploadFile = File(...),
     target_lang: str = "en",
     extra_langs: str = "en,fr,ar",
@@ -244,25 +338,23 @@ async def translate_video(
     multi-language translations of each sentence.
 
     Uses StreamingRecognizer + SentenceBuilder under the hood for continuous
-    recognition + phrase detection.
+    recognition + phrase detection. Video processing uses a private session,
+    so it never touches other clients' state.
     """
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
+    tr = _require_translator()
 
-    contents = await file.read()
-    if len(contents) > 50 * 1024 * 1024:  # 50 MB cap for video
-        raise HTTPException(status_code=413, detail="Video too large (max 50 MB)")
+    contents = await _read_capped(file, VIDEO_MAX_BYTES)
 
     # Save to a temp file because cv2.VideoCapture needs a path
-    import tempfile, os
+    import tempfile
     suffix = os.path.splitext(file.filename or "video.mp4")[1] or ".mp4"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(contents)
         tmp_path = tmp.name
     try:
-        extra = [l.strip() for l in extra_langs.split(",") if l.strip()]
+        extra = [l.strip() for l in extra_langs.split(",") if l.strip()][:8]
         sentences = await run_in_threadpool(
-            translator.translate_video_file,
+            tr.translate_video_file,
             tmp_path,
             target_lang=target_lang,
             extra_langs=extra,
@@ -281,24 +373,26 @@ async def translate_video(
             pass
 
 
+# ── Dictionary ──────────────────────────────────────────────────────────
+
 @app.get("/dictionary/labels")
 async def get_labels():
     """Get all TSL labels in canonical order."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     return {"labels": dictionary.get_all_labels(), "count": len(dictionary)}
 
 
 @app.get("/dictionary/words")
 async def get_words():
     """Get all Tunisian dialect words."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     return {"words": dictionary.get_all_tunisian_words()}
 
 
 @app.get("/dictionary/categories")
 async def get_categories():
     """Get all categories and their labels."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     return {
         "categories": {
             cat: dictionary.get_labels_by_category(cat)
@@ -310,31 +404,32 @@ async def get_categories():
 @app.get("/dictionary/{label}")
 async def get_translation(label: str):
     """Get translation for a TSL label."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     result = dictionary.get_all_translations(label)
     if not result:
         raise HTTPException(status_code=404, detail=f"Label '{label}' not found")
     return result
 
 
+# ── History (per session) ───────────────────────────────────────────────
+
 @app.get("/history")
-async def get_history():
-    """Get translation history (bounded)."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    return {"history": translator.get_history(), "count": len(translator.get_history())}
+async def get_history(request: Request):
+    """Get translation history for this client session (bounded)."""
+    tr = _require_translator()
+    history = tr.get_history(_session_id(request))
+    return {"history": history, "count": len(history)}
 
 
 @app.delete("/history")
-async def clear_history():
-    """Clear translation history."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    translator.clear_history()
+async def clear_history(request: Request):
+    """Clear translation history for this client session."""
+    tr = _require_translator()
+    tr.clear_history(_session_id(request))
     return {"message": "History cleared"}
 
 
-# ── Alphabet / Finger Spelling ──
+# ── Alphabet / Finger Spelling ──────────────────────────────────────────
 
 @app.get("/alphabet/labels")
 async def get_alphabet_labels():
@@ -354,7 +449,33 @@ async def get_alphabet_translation(label: str):
     return result
 
 
-# ── LLM Configuration ──
+# ── Inference settings ──────────────────────────────────────────────────
+
+class InferenceSettingsRequest(BaseModel):
+    confidence_threshold: Optional[float] = None
+    smoothing_window: Optional[int] = None
+
+
+@app.get("/settings/inference")
+async def get_inference_settings():
+    """Get current global inference settings."""
+    return _require_translator().get_inference_settings()
+
+
+@app.post("/settings/inference")
+async def set_inference_settings(request: InferenceSettingsRequest):
+    """Update confidence threshold and/or smoothing window (validated)."""
+    tr = _require_translator()
+    try:
+        return tr.set_inference_settings(
+            confidence_threshold=request.confidence_threshold,
+            smoothing_window=request.smoothing_window,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── LLM Configuration ───────────────────────────────────────────────────
 
 class LLMConfigRequest(BaseModel):
     provider: str = "openrouter"
@@ -365,132 +486,162 @@ class LLMConfigRequest(BaseModel):
 
 @app.get("/llm/config")
 async def get_llm_config():
-    """Get current LLM corrector configuration."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    return translator.get_llm_config()
+    """Get current LLM corrector configuration (never exposes the key)."""
+    return _require_translator().get_llm_config()
 
 
 @app.post("/llm/config")
-async def set_llm_config(request: LLMConfigRequest):
-    """Configure the LLM corrector (provider, API key, model)."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    translator.configure_llm(
-        provider=request.provider,
-        api_key=request.api_key,
-        model=request.model,
-        base_url=request.base_url,
-    )
-    return {"message": "LLM configured", "config": translator.get_llm_config()}
+async def set_llm_config(request: Request, body: LLMConfigRequest):
+    """Configure the LLM corrector (provider, API key, model).
+
+    Hardened:
+      * optional X-Admin-Token auth when TSL_ADMIN_TOKEN is set;
+      * per-IP rate limit;
+      * LLMConfig.validate() rejects arbitrary/unsafe base_url values
+        (SSRF guard) — see LLM_ALLOW_CUSTOM_BASE_URL / LLM_ALLOWED_HOSTS.
+    """
+    tr = _require_translator()
+    _require_admin(request)
+    _rate_limit(request, "llm_config", limit=10)
+
+    if len(body.api_key) > 512 or len(body.base_url) > 512 or len(body.model) > 256:
+        raise HTTPException(status_code=413, detail="Configuration field too long")
+
+    try:
+        tr.configure_llm(
+            provider=body.provider,
+            api_key=body.api_key,
+            model=body.model,
+            base_url=body.base_url,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "LLM configured", "config": tr.get_llm_config()}
 
 
 @app.post("/llm/correct")
-async def correct_with_llm(request: TextTranslationRequest):
-    """Correct a text using the configured LLM."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    corrected = await translator.correct_with_llm(request.text)
-    return {"raw": request.text, "corrected": corrected}
+async def correct_with_llm(request: Request, body: TextTranslationRequest):
+    """Correct a text using the configured LLM (rate-limited, size-capped)."""
+    tr = _require_translator()
+    _rate_limit(request, "llm_correct", limit=60)
+    text = body.text[:MAX_TEXT_CHARS]
+    corrected = await tr.correct_with_llm(text)
+    return {"raw": text, "corrected": corrected}
 
 
-# ── Mode Controller ──
+# ── Mode Controller (per session) ───────────────────────────────────────
 
 @app.get("/mode")
-async def get_mode():
-    """Get current translation mode (sign/spell)."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    return translator.get_mode_state()
+async def get_mode(request: Request):
+    """Get current translation mode (sign/spell) for this session."""
+    return _require_translator().get_mode_state(_session_id(request))
 
 
 @app.post("/mode/toggle")
-async def toggle_mode():
-    """Toggle between sign and spell mode."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    new_mode = translator.toggle_mode()
-    return {"mode": new_mode, "state": translator.get_mode_state()}
+async def toggle_mode(request: Request):
+    """Toggle between sign and spell mode for this session."""
+    tr = _require_translator()
+    sid = _session_id(request)
+    new_mode = tr.toggle_mode(sid)
+    return {"mode": new_mode, "state": tr.get_mode_state(sid)}
 
 
 @app.post("/spell/flush")
-async def flush_spell():
+async def flush_spell(request: Request):
     """Flush the spell assembler and return the assembled sentence."""
-    if translator is None:
-        raise HTTPException(status_code=503, detail="Translator not initialized")
-    sentence = translator.flush_spell()
+    sentence = _require_translator().flush_spell(_session_id(request))
     return {"sentence": sentence}
 
 
-# ── WebSocket for real-time camera ──
+# ── WebSocket for real-time camera ──────────────────────────────────────
 
 @app.websocket("/ws/camera")
 async def websocket_camera(websocket: WebSocket):
     """
     WebSocket endpoint for real-time camera translation.
 
+    Each connection gets its own session (isolated history/mode/smoothing).
+
     Client sends: base64-encoded JPEG frames
     Server sends: translation results as JSON
 
     Protocol:
       - Client connects
-      - Client sends JSON: {"frame": "<base64>", "mode": "sign"|"spell"}
+      - Client sends JSON: {"frame": "<base64>"}
       - Server responds: {"type": "translation", "data": {...}}
+        or {"type": "spell", "data": {...}} / {"type": "mode_changed", ...}
       - Client can send: {"action": "toggle_mode"}
       - Client can send: {"action": "flush_spell"}
       - Client can send: {"action": "clear_history"}
+      - Client can send: {"action": "correct", "text": "..."}
     """
     await websocket.accept()
-    if translator is None:
+    tr = translator
+    if tr is None:
         await websocket.send_json({"type": "error", "message": "Translator not initialized"})
         await websocket.close()
         return
 
+    session_id = uuid.uuid4().hex
     try:
         while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
+            raw = await websocket.receive_text()
+            if len(raw) > MAX_WS_MSG_BYTES:
+                await websocket.send_json({"type": "error", "message": "Message too large"})
+                continue
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                await websocket.send_json({"type": "error", "message": "Invalid JSON"})
+                continue
+            if not isinstance(msg, dict):
+                await websocket.send_json({"type": "error", "message": "Invalid message"})
+                continue
 
-            if msg.get("action") == "toggle_mode":
-                new_mode = translator.toggle_mode()
+            action = msg.get("action")
+
+            if action == "toggle_mode":
+                await run_in_threadpool(tr.toggle_mode, session_id)
                 await websocket.send_json({
                     "type": "mode_changed",
-                    "data": translator.get_mode_state(),
+                    "data": tr.get_mode_state(session_id),
                 })
                 continue
 
-            if msg.get("action") == "flush_spell":
-                sentence = translator.flush_spell()
+            if action == "flush_spell":
+                sentence = await run_in_threadpool(tr.flush_spell, session_id)
                 await websocket.send_json({
                     "type": "spell_flushed",
                     "data": {"sentence": sentence},
                 })
                 continue
 
-            if msg.get("action") == "clear_history":
-                translator.clear_history()
+            if action == "clear_history":
+                tr.clear_history(session_id)
                 await websocket.send_json({"type": "history_cleared"})
                 continue
 
-            if msg.get("action") == "correct":
-                raw = msg.get("text", "")
-                corrected = await translator.correct_with_llm(raw)
+            if action == "correct":
+                text = str(msg.get("text", ""))[:MAX_TEXT_CHARS]
+                corrected = await tr.correct_with_llm(text)
                 await websocket.send_json({
                     "type": "corrected",
-                    "data": {"raw": raw, "corrected": corrected},
+                    "data": {"raw": text, "corrected": corrected},
                 })
                 continue
 
-            # Default: process frame
+            # Default: process frame (multi-mode: sign + spell + mode control)
             frame_b64 = msg.get("frame")
             if not frame_b64:
                 await websocket.send_json({"type": "error", "message": "No frame provided"})
                 continue
+            if not isinstance(frame_b64, str) or len(frame_b64) > MAX_WS_MSG_BYTES:
+                await websocket.send_json({"type": "error", "message": "Frame too large"})
+                continue
 
             # Decode base64 frame
-            import base64
             try:
-                frame_bytes = base64.b64decode(frame_b64)
+                frame_bytes = base64.b64decode(frame_b64, validate=False)
                 nparr = np.frombuffer(frame_bytes, np.uint8)
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if frame is None:
@@ -500,19 +651,38 @@ async def websocket_camera(websocket: WebSocket):
                 await websocket.send_json({"type": "error", "message": "Failed to decode frame"})
                 continue
 
-            # Run inference in threadpool
-            result = await run_in_threadpool(translator.translate_frame, frame)
+            # Run inference in threadpool (session-scoped state)
+            result = await run_in_threadpool(
+                tr.translate_frame_multi_mode, frame, session_id=session_id
+            )
 
-            await websocket.send_json({
-                "type": "translation",
-                "data": result,
-            })
+            mtype = result.get("type")
+            if mtype == "mode_change":
+                await websocket.send_json({
+                    "type": "mode_changed",
+                    "data": tr.get_mode_state(session_id),
+                    "sign": result.get("sign"),
+                })
+            elif mtype == "spell":
+                await websocket.send_json({"type": "spell", "data": result})
+            elif mtype == "error":
+                await websocket.send_json({
+                    "type": "error",
+                    "message": result.get("error", "Unknown error"),
+                })
+            else:
+                await websocket.send_json({"type": "translation", "data": result})
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        try:
+            tr.delete_session(session_id)
         except Exception:
             pass
 

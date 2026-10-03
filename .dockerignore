@@ -1,0 +1,43 @@
+# VCS and secrets — never bake .git or the real API key (.env) into the image.
+.git
+.gitignore
+.env
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Large / regenerable local data (bind-mounted at runtime instead)
+data/raw/
+data/alphabet/
+alternative_models/
+05_compare/
+manual_tests/
+notebooks/
+docs/
+test_images/
+
+# Local logs
+*.log
+logs_*.txt
+training_log.txt
+gh_login_*.txt
+
+# Documentation (keep README.md)
+*.md
+!README.md
+
+# IDE / OS noise
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db

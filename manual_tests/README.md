@@ -93,18 +93,19 @@ Once you have recorded your test videos, transfer them to the computer:
 - **Email** — Send the videos to yourself and download on the computer
 - **Cloud storage** — Upload to Google Drive or OneDrive and download on the computer
 
-Place all test videos in the `manual_tests\test_videos\` folder.
+Keep your test videos in a folder of your choice (there is no dedicated `test_videos` folder) — you will upload them to the app from the browser during testing. The step-by-step scenario guides live in `manual_tests\scenarios\`.
 
 ---
 
 ## 6. How to Use the App
 
 1. Launch the app using one of the methods in [Quick Start](#3-quick-start)
-2. The app will open a window showing your **live camera feed**
-3. When you are ready, **perform a sign** in front of the camera
-4. The app will process the sign and display the result on screen
-5. Repeat for each sign you want to test
-6. When done, **close the window** or press `q` to quit
+2. Your **browser opens automatically** (http://localhost:3000) — the app runs in the browser, not in a desktop window
+3. Click **Start Camera** and allow camera access when prompted
+4. When you are ready, **perform a sign** in front of the camera
+5. The app will process the sign and display the result on screen
+6. Repeat for each sign you want to test
+7. When done, **close the browser tab** (or stop the launcher with `Ctrl+C` in the terminal)
 
 ---
 
@@ -143,7 +144,7 @@ There are 7 test scenarios to complete:
 
 For each scenario, fill in the results template:
 
-1. Open `manual_tests\results_template.md`
+1. Open `manual_tests\results\MANUAL_TEST_RESULTS.md`
 2. For each sign you test, record:
    - The sign you performed
    - The translation output from the app

@@ -140,12 +140,15 @@ def test_alphabet_model():
     model_path = PROJECT_ROOT / "models" / "alphabet" / "spell_classifier_best.pth"
 
     # Load model
-    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
     state_dict = checkpoint.get("model_state_dict", checkpoint)
 
-    # Detect architecture
+    # Detect architecture from state_dict keys (same logic as
+    # src/translation/translator.py::_load_spell_model)
     if any(k.startswith("net.") for k in state_dict.keys()):
         model = SpellClassifier(num_classes=31, architecture="mlp")
+    elif any(k.startswith("input_block.") for k in state_dict.keys()):
+        model = SpellClassifier(num_classes=31, architecture="residual")
     else:
         model = SpellClassifier(num_classes=31, architecture="mlp")
 
@@ -167,8 +170,8 @@ def test_alphabet_model():
         preds = logits.argmax(dim=-1).numpy()
 
     acc = accuracy_score(y_test, preds)
-    f1_macro = f1_score(y_test, preds, average="macro")
-    f1_weighted = f1_score(y_test, preds, average="weighted")
+    f1_macro = f1_score(y_test, preds, average="macro", zero_division=0)
+    f1_weighted = f1_score(y_test, preds, average="weighted", zero_division=0)
 
     print(f"  Test samples: {len(y_test)}")
     print(f"  Accuracy: {acc:.4f}")
@@ -220,7 +223,7 @@ def test_sign_model():
     from sklearn.metrics import accuracy_score, f1_score, classification_report
 
     # Load model
-    checkpoint = torch.load(DEFAULT_MODEL_PATH, map_location="cpu", weights_only=False)
+    checkpoint = torch.load(DEFAULT_MODEL_PATH, map_location="cpu", weights_only=True)
     model = create_model("landmark", NUM_CLASSES)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -229,10 +232,19 @@ def test_sign_model():
     features = np.load(PROJECT_ROOT / "data" / "processed" / "features.npy")
     labels = np.load(PROJECT_ROOT / "data" / "processed" / "labels.npy")
 
-    # Use 80/20 split for evaluation (no separate test set exists for signs)
+    # Use a seeded 80/20 holdout for evaluation (no separate test set exists
+    # for signs). The data is class-ordered, so a contiguous slice would be
+    # non-representative — shuffle first.
+    rng = np.random.RandomState(42)
+    order = rng.permutation(len(features))
+    features = features[order]
+    labels = labels[order]
     split = int(len(features) * 0.8)
     X_test = features[split:]
     y_test = labels[split:]
+    print("  CAVEAT: this holdout is a seeded 80/20 shuffle of the FULL dataset;")
+    print("          it approximates (does NOT exactly reproduce) the training")
+    print("          split, so it may overlap the model's training samples.")
 
     dictionary = TSLDictionary()
     class_names = dictionary.get_all_labels()
@@ -244,7 +256,7 @@ def test_sign_model():
         preds = logits.argmax(dim=-1).numpy()
 
     acc = accuracy_score(y_test, preds)
-    f1_macro = f1_score(y_test, preds, average="macro")
+    f1_macro = f1_score(y_test, preds, average="macro", zero_division=0)
 
     print(f"  Test samples: {len(y_test)}")
     print(f"  Accuracy: {acc:.4f}")
@@ -291,9 +303,10 @@ def test_landmark_pipeline():
     frame_random = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     features = extractor.extract_features(frame_random)
     if features is not None:
-        assert features.shape == (1, 126), f"Expected (1, 126), got {features.shape}"
-        # Test model inference
-        tensor = torch.FloatTensor(features)
+        # extract_features returns a single (126,) vector per frame
+        assert features.shape == (126,), f"Expected (126,), got {features.shape}"
+        # Test model inference (batch of one frame)
+        tensor = torch.FloatTensor(features).unsqueeze(0)
         with torch.no_grad():
             logits = model(tensor)
             assert logits.shape == (1, NUM_CLASSES), f"Expected (1, {NUM_CLASSES}), got {logits.shape}"

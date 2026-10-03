@@ -71,7 +71,7 @@
                 <div class="setting-card">
                     <h3>LLM Correction</h3>
                     <div class="form-group">
-                        <label>Provider</label>
+                        <label for="llm-provider">Provider</label>
                         <select id="llm-provider">
                             <option value="openrouter">OpenRouter</option>
                             <option value="openai">OpenAI</option>
@@ -81,15 +81,15 @@
                         </select>
                     </div>
                     <div class="form-group">
-                        <label>API Key</label>
-                        <input type="password" id="llm-api-key" placeholder="sk-...">
+                        <label for="llm-api-key">API Key</label>
+                        <input type="password" id="llm-api-key" placeholder="sk-..." autocomplete="off">
                     </div>
                     <div class="form-group">
-                        <label>Model</label>
+                        <label for="llm-model">Model</label>
                         <input type="text" id="llm-model" placeholder="meta-llama/llama-3.1-8b-instruct:free">
                     </div>
                     <div class="form-group" id="custom-url-group" hidden>
-                        <label>Base URL</label>
+                        <label for="llm-base-url">Base URL</label>
                         <input type="text" id="llm-base-url" placeholder="https://api.example.com/v1">
                     </div>
                     <button id="btn-save-llm" class="btn btn-primary">Save LLM Config</button>
@@ -100,15 +100,17 @@
                 <div class="setting-card">
                     <h3>Translation Settings</h3>
                     <div class="form-group">
-                        <label>Confidence Threshold</label>
-                        <input type="range" id="confidence-threshold" min="0" max="1" step="0.05" value="0.5">
+                        <label for="confidence-threshold">Confidence Threshold</label>
+                        <input type="range" id="confidence-threshold" min="0" max="1" step="0.05" value="0.5"
+                               aria-describedby="confidence-value">
                         <span id="confidence-value">0.5</span>
                     </div>
                     <div class="form-group">
-                        <label>Smoothing Window</label>
-                        <input type="number" id="smoothing-window" min="1" max="20" value="5">
+                        <label for="smoothing-window">Smoothing Window</label>
+                        <input type="number" id="smoothing-window" min="1" max="60" value="5">
                     </div>
                     <button id="btn-save-settings" class="btn btn-primary">Save Settings</button>
+                    <div id="settings-status" class="setting-status"></div>
                 </div>
             </div>
         </div>

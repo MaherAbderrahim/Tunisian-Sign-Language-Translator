@@ -11,6 +11,9 @@ let stream = null;
 let cameraActive = false;
 let sendInterval = null;
 let currentMode = 'sign';
+let lastCorrectedText = '';
+let lastCorrectAt = 0;
+const CORRECT_MIN_INTERVAL_MS = 3000; // throttle LLM calls (cost + latency)
 
 // ── DOM ──
 const $ = (sel) => document.querySelector(sel);
@@ -69,6 +72,9 @@ function handleMessage(msg) {
                 addToHistory(msg.data.sentence);
             }
             break;
+        case 'spell':
+            updateSpell(msg.data);
+            break;
         case 'corrected':
             $('#output-corrected').textContent = msg.data.corrected || '—';
             break;
@@ -94,13 +100,39 @@ function updateTranslation(data) {
     $('#output-raw').textContent = raw;
     $('#output-confidence').textContent = conf;
 
-    // Auto-correct via LLM if configured
-    if (ws && ws.readyState === WebSocket.OPEN && raw) {
+    // Auto-correct via LLM if configured (throttled: one call per few
+    // seconds and only when the text actually changed)
+    const now = Date.now();
+    if (
+        ws && ws.readyState === WebSocket.OPEN
+        && raw !== lastCorrectedText
+        && now - lastCorrectAt >= CORRECT_MIN_INTERVAL_MS
+    ) {
+        lastCorrectedText = raw;
+        lastCorrectAt = now;
         ws.send(JSON.stringify({ action: 'correct', text: raw }));
     }
 
     // Add to history
     addToHistory(raw, conf);
+}
+
+function updateSpell(data) {
+    currentMode = 'spell';
+    $('#mode-status').textContent = 'Mode: SPELL';
+    const text = data.sentence || data.current_word || '';
+    const letter = data.arabic || data.letter || '';
+    if (text) {
+        $('#output-raw').textContent = text;
+    } else if (letter && !data.rejected) {
+        $('#output-raw').textContent = letter;
+    }
+    if (data.confidence != null && !data.rejected) {
+        $('#output-confidence').textContent = (data.confidence || 0).toFixed(2);
+    }
+    if (data.event === 'word_done' && data.current_word) {
+        addToHistory(data.current_word);
+    }
 }
 
 function addToHistory(text, confidence = '') {
@@ -114,7 +146,7 @@ function addToHistory(text, confidence = '') {
     const time = new Date().toLocaleTimeString();
     item.innerHTML = `
         <span>${text}</span>
-        <span class="time">${confidence ? conf + ' ' : ''}${time}</span>
+        <span class="time">${confidence ? confidence + ' ' : ''}${time}</span>
     `;
     list.insertBefore(item, list.firstChild);
 
@@ -284,7 +316,7 @@ $('#confidence-threshold').addEventListener('input', (e) => {
 $('#btn-save-llm').addEventListener('click', async () => {
     const config = {
         provider: $('#llm-provider').value,
-        api_key: $('#llm-api-key').value,
+        api_key: $('#llm-api-key').value === '••••••••' ? '' : $('#llm-api-key').value,
         model: $('#llm-model').value,
         base_url: $('#llm-base-url').value,
     };
@@ -295,17 +327,38 @@ $('#btn-save-llm').addEventListener('click', async () => {
             body: JSON.stringify(config),
         });
         const result = await resp.json();
-        $('#llm-status').textContent = 'Saved!';
-        setTimeout(() => { $('#llm-status').textContent = ''; }, 2000);
+        if (!resp.ok) {
+            $('#llm-status').textContent = 'Error: ' + (result.detail || resp.status);
+        } else {
+            $('#llm-status').textContent = 'Saved!';
+            setTimeout(() => { $('#llm-status').textContent = ''; }, 2000);
+        }
     } catch (err) {
         $('#llm-status').textContent = 'Error: ' + err.message;
     }
 });
 
-$('#btn-save-settings').addEventListener('click', () => {
-    localStorage.setItem('tsl_confidence', $('#confidence-threshold').value);
-    localStorage.setItem('tsl_smoothing', $('#smoothing-window').value);
-    alert('Settings saved locally');
+$('#btn-save-settings').addEventListener('click', async () => {
+    const confidence = parseFloat($('#confidence-threshold').value);
+    const smoothing_window = parseInt($('#smoothing-window').value, 10);
+    localStorage.setItem('tsl_confidence', confidence);
+    localStorage.setItem('tsl_smoothing', smoothing_window);
+    try {
+        const resp = await fetch(`${API_BASE}/settings/inference`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confidence_threshold: confidence, smoothing_window }),
+        });
+        const result = await resp.json();
+        if (!resp.ok) {
+            $('#settings-status').textContent = 'Error: ' + (result.detail || resp.status);
+            return;
+        }
+        $('#settings-status').textContent = 'Saved!';
+    } catch (err) {
+        $('#settings-status').textContent = 'Error: ' + err.message;
+    }
+    setTimeout(() => { $('#settings-status').textContent = ''; }, 2000);
 });
 
 // ── Mode Toggle ──
@@ -343,6 +396,20 @@ function loadSettings() {
     if (smooth) {
         $('#smoothing-window').value = smooth;
     }
+
+    // Load server-side inference settings (fall back to localStorage)
+    fetch(`${API_BASE}/settings/inference`)
+        .then(r => r.json())
+        .then(s => {
+            if (typeof s.confidence_threshold === 'number') {
+                $('#confidence-threshold').value = s.confidence_threshold;
+                $('#confidence-value').textContent = s.confidence_threshold;
+            }
+            if (typeof s.smoothing_window === 'number') {
+                $('#smoothing-window').value = s.smoothing_window;
+            }
+        })
+        .catch(() => {});
 
     // Load LLM config
     fetch(`${API_BASE}/llm/config`)

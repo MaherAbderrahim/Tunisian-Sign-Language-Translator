@@ -32,6 +32,7 @@ from src.config.settings import (
 )
 from src.models.landmark_extractor import MediaPipeLandmarkExtractor
 from src.languages.alphabet import TSLAlphabet
+from sklearn.model_selection import train_test_split
 
 
 # Mapping: HaGRID letter -> TSL alphabet label
@@ -107,6 +108,38 @@ def download_hagrid():
     return False
 
 
+def save_splits(features: np.ndarray, labels: np.ndarray):
+    """Save stratified 80/10/10 train/val/test splits (random_state=42).
+
+    Mirrors scripts/prepare_arsl.py so the X_*/y_* files in
+    ALPHABET_PROCESSED_DIR are always consistent with the dataset that
+    produced them (no stale splits from a different source).
+    """
+    try:
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            features, labels, test_size=0.2, random_state=42, stratify=labels
+        )
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.5, random_state=42, stratify=y_temp
+        )
+    except ValueError:
+        # Too few samples per class for stratification
+        X_train, X_temp, y_train, y_temp = train_test_split(
+            features, labels, test_size=0.2, random_state=42
+        )
+        X_val, X_test, y_val, y_test = train_test_split(
+            X_temp, y_temp, test_size=0.5, random_state=42
+        )
+
+    np.save(ALPHABET_PROCESSED_DIR / "X_train.npy", X_train)
+    np.save(ALPHABET_PROCESSED_DIR / "y_train.npy", y_train)
+    np.save(ALPHABET_PROCESSED_DIR / "X_val.npy", X_val)
+    np.save(ALPHABET_PROCESSED_DIR / "y_val.npy", y_val)
+    np.save(ALPHABET_PROCESSED_DIR / "X_test.npy", X_test)
+    np.save(ALPHABET_PROCESSED_DIR / "y_test.npy", y_test)
+    print(f"  Splits: train={len(X_train)}, val={len(X_val)}, test={len(X_test)}")
+
+
 def prepare_data(max_images_per_class: int = 200, augment: bool = True):
     """
     Process HaGRID images into MediaPipe landmarks for TSL alphabet.
@@ -134,6 +167,13 @@ def prepare_data(max_images_per_class: int = 200, augment: bool = True):
 
     # Process each HaGRID letter
     for hagrid_letter, tsl_label in HAGRID_TO_TSL_MAP.items():
+        if tsl_label not in label_names:
+            # SPELL_LABELS has 28 letters + space/backspace/finish — no digit
+            # classes, so label_names.index(tsl_label) would raise ValueError.
+            print(f"  WARNING: skipping {hagrid_letter} -> {tsl_label}: "
+                  "not in SPELL_LABELS (no digit classes in the TSL alphabet)")
+            continue
+
         letter_dir = images_dir / hagrid_letter
         if not letter_dir.exists():
             print(f"  Skipping {hagrid_letter} (not found)")
@@ -195,6 +235,9 @@ def prepare_data(max_images_per_class: int = 200, augment: bool = True):
     with open(ALPHABET_PROCESSED_DIR / "class_names.txt", "w", encoding="utf-8") as f:
         for name in label_names:
             f.write(name + "\n")
+
+    # Keep the X_*/y_* splits in sync with this dataset
+    save_splits(features, labels)
 
     # Save stats
     stats = {
@@ -261,6 +304,9 @@ def create_synthetic_dataset():
     with open(ALPHABET_PROCESSED_DIR / "class_names.txt", "w", encoding="utf-8") as f:
         for name in label_names:
             f.write(name + "\n")
+
+    # Keep the X_*/y_* splits in sync with this dataset
+    save_splits(features, labels)
 
     print()
     print(f"Synthetic dataset saved to {ALPHABET_PROCESSED_DIR}")

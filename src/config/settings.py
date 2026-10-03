@@ -140,8 +140,8 @@ for _dir in [
 # ============================================================================
 # Finger Spelling — Alphabet TSL
 # ============================================================================
-# 28 Arabic letters + 10 digits = 38 classes for finger spelling.
-ALPHABET_NUM_CLASSES = 31  # 28 Arabic letters + Space + Backspace + Finish
+# Finger spelling: 28 Arabic letters + Space + Backspace + Finish = 31 classes (digits are NOT part of the alphabet).
+ALPHABET_NUM_CLASSES = 31
 ALPHABET_INPUT_SIZE = 126  # Same as V1: 2 hands × 21 landmarks × 3 coords
 
 # Data paths for alphabet dataset

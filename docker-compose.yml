@@ -10,6 +10,14 @@ services:
       - ./data:/app/data
     environment:
       - PYTHONPATH=/app
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_ALLOW_CUSTOM_BASE_URL=${LLM_ALLOW_CUSTOM_BASE_URL:-false}
+      - LLM_ALLOWED_HOSTS=${LLM_ALLOWED_HOSTS:-}
+      - TSL_ADMIN_TOKEN=${TSL_ADMIN_TOKEN:-}
+      - TSL_CORS_ORIGINS=${TSL_CORS_ORIGINS:-}
     restart: unless-stopped
 
   web:
@@ -22,10 +30,14 @@ services:
       - ./data:/app/data
     environment:
       - PYTHONPATH=/app
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - LLM_MODEL=${LLM_MODEL:-}
+      - LLM_BASE_URL=${LLM_BASE_URL:-}
+      - LLM_ALLOW_CUSTOM_BASE_URL=${LLM_ALLOW_CUSTOM_BASE_URL:-false}
+      - LLM_ALLOWED_HOSTS=${LLM_ALLOWED_HOSTS:-}
+      - TSL_ADMIN_TOKEN=${TSL_ADMIN_TOKEN:-}
+      - TSL_CORS_ORIGINS=${TSL_CORS_ORIGINS:-}
     restart: unless-stopped
     depends_on:
       - api
-
-volumes:
-  models:
-  data:

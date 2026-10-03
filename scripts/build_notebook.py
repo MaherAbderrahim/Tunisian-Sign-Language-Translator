@@ -721,7 +721,7 @@ cells.append(code(r"""
 prev_ckpt_path = MODELS_DIR / "best_model.pth"
 if prev_ckpt_path.exists():
     prev_model = create_model("landmark", NUM_CLASSES).to(device)
-    prev_state = torch.load(prev_ckpt_path, map_location=device, weights_only=False)
+    prev_state = torch.load(prev_ckpt_path, map_location=device, weights_only=True)
     prev_model.load_state_dict(prev_state["model_state_dict"])
     prev_model.eval()
 

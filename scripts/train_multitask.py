@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import random
 import sys
 import json
 import time
@@ -39,6 +40,15 @@ from src.config.settings import (
 from src.models.multi_task_classifier import MultiTaskClassifier
 from src.languages.alphabet import TSLAlphabet
 from src.languages.dictionary import TSLDictionary
+
+
+def _set_seed(seed: int = 42) -> None:
+    """Seed python/numpy/torch RNGs so runs are reproducible."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class MultiTaskDataset(Dataset):
@@ -95,6 +105,7 @@ def load_spell_data():
 
 def train_model(args):
     """Train the multi-task classifier."""
+    _set_seed(42)
     print("=" * 60)
     print("Training Multi-Task Classifier (Version B)")
     print("=" * 60)

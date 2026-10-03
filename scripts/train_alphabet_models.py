@@ -1,8 +1,10 @@
 """
 Train and compare 3 alphabet models: MLP, BiLSTM, Transformer.
 Saves the best model and produces a comparison report.
+Model selection uses the VALIDATION set only; the test set is evaluated
+once, for the selected winner.
 """
-import sys, os, time, json
+import sys, os, time, json, random
 from pathlib import Path
 import numpy as np
 import torch
@@ -22,6 +24,15 @@ NUM_CLASSES = 31
 INPUT_DIM = 126
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {DEVICE}")
+
+
+def _set_seed(seed: int = 42) -> None:
+    """Seed python/numpy/torch RNGs so runs are reproducible."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 # ── Load data ──
 X_train = np.load(PROCESSED / "X_train.npy")
@@ -88,6 +99,7 @@ class TransformerModel(nn.Module):
 
 # ── Training function ──
 def train_model(model, name, epochs=80, lr=1e-3):
+    _set_seed(42)
     model = model.to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
@@ -139,23 +151,24 @@ def train_model(model, name, epochs=80, lr=1e-3):
                 print(f"  [{name}] Early stop at epoch {epoch+1}")
                 break
 
-    # Load best and evaluate on test
-    ckpt = torch.load(MODELS_DIR / f"{name}_best.pth", map_location=DEVICE, weights_only=False)
+    # Load best checkpoint and evaluate it on the VALIDATION set. The test
+    # set is only touched later, once for the selected winner.
+    ckpt = torch.load(MODELS_DIR / f"{name}_best.pth", map_location=DEVICE, weights_only=True)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
 
     all_preds, all_true = [], []
-    test_loss = 0
+    val_loss = 0
     with torch.no_grad():
-        for xb, yb in test_loader:
+        for xb, yb in val_loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             logits = model(xb)
-            test_loss += criterion(logits, yb).item() * len(xb)
+            val_loss += criterion(logits, yb).item() * len(xb)
             all_preds.extend(logits.argmax(1).cpu().numpy())
             all_true.extend(yb.cpu().numpy())
-    test_loss /= len(X_test)
-    test_acc = accuracy_score(all_true, all_preds)
-    test_f1 = f1_score(all_true, all_preds, average="macro")
+    val_loss /= len(X_val)
+    val_acc = accuracy_score(all_true, all_preds)
+    val_f1 = f1_score(all_true, all_preds, average="macro", zero_division=0)
 
     # Model size
     param_count = sum(p.numel() for p in model.parameters())
@@ -174,9 +187,9 @@ def train_model(model, name, epochs=80, lr=1e-3):
 
     return {
         "name": name,
-        "test_acc": test_acc,
-        "test_f1": test_f1,
-        "test_loss": test_loss,
+        "val_acc": val_acc,
+        "val_f1": val_f1,
+        "val_loss": val_loss,
         "params": param_count,
         "size_mb": size_mb,
         "latency_ms": latency_ms,
@@ -185,35 +198,35 @@ def train_model(model, name, epochs=80, lr=1e-3):
 
 
 if __name__ == "__main__":
-    # ── Train all models ──
-    print("\n" + "=" * 60)
-    print("Training MLP")
-    print("=" * 60)
-    mlp_result = train_model(MLPModel(), "mlp", epochs=80)
+    _set_seed(42)
 
-    print("\n" + "=" * 60)
-    print("Training BiGRU")
-    print("=" * 60)
-    gru_result = train_model(BiGRUModel(), "bigru", epochs=80)
-
-    print("\n" + "=" * 60)
-    print("Training Transformer")
-    print("=" * 60)
-    trans_result = train_model(TransformerModel(), "transformer", epochs=80)
+    # ── Train all models (selection uses the validation set only) ──
+    candidates = [
+        ("mlp", MLPModel()),
+        ("bigru", BiGRUModel()),
+        ("transformer", TransformerModel()),
+    ]
+    results = []
+    trained = {}
+    for name, model in candidates:
+        print("\n" + "=" * 60)
+        print(f"Training {name}")
+        print("=" * 60)
+        trained[name] = model
+        results.append(train_model(model, name, epochs=80))
 
     # ── Comparison ──
-    results = [mlp_result, gru_result, trans_result]
     print("\n" + "=" * 60)
-    print("MODEL COMPARISON")
+    print("MODEL COMPARISON (validation set)")
     print("=" * 60)
-    print(f"{'Model':<15} {'Accuracy':>10} {'F1':>10} {'Params':>10} {'Size':>8} {'Latency':>10}")
+    print(f"{'Model':<15} {'ValAcc':>10} {'ValF1':>10} {'Params':>10} {'Size':>8} {'Latency':>10}")
     print("-" * 63)
     for r in results:
-        print(f"{r['name']:<15} {r['test_acc']:>10.4f} {r['test_f1']:>10.4f} {r['params']:>10,} {r['size_mb']:>7.2f}M {r['latency_ms']:>9.2f}ms")
+        print(f"{r['name']:<15} {r['val_acc']:>10.4f} {r['val_f1']:>10.4f} {r['params']:>10,} {r['size_mb']:>7.2f}M {r['latency_ms']:>9.2f}ms")
 
-    # Save comparison
-    best = max(results, key=lambda r: r["test_acc"])
-    print(f"\nBest model: {best['name']} (accuracy={best['test_acc']:.4f})")
+    # Save comparison — pick on VAL accuracy, never on the test set.
+    best = max(results, key=lambda r: r["val_acc"])
+    print(f"\nBest model (by val_acc): {best['name']} (val_acc={best['val_acc']:.4f})")
 
     # Copy best to spell_classifier_best.pth
     import shutil
@@ -221,6 +234,25 @@ if __name__ == "__main__":
     dst = MODELS_DIR / "spell_classifier_best.pth"
     shutil.copy2(src, dst)
     print(f"Saved best model to {dst}")
+
+    # ── Test evaluation: once, on the selected winner only ──
+    best_model = trained[best["name"]]
+    best_model.eval()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    all_preds, all_true = [], []
+    test_loss = 0
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb, yb = xb.to(DEVICE), yb.to(DEVICE)
+            logits = best_model(xb)
+            test_loss += criterion(logits, yb).item() * len(xb)
+            all_preds.extend(logits.argmax(1).cpu().numpy())
+            all_true.extend(yb.cpu().numpy())
+    test_loss /= len(X_test)
+    test_acc = accuracy_score(all_true, all_preds)
+    test_f1 = f1_score(all_true, all_preds, average="macro", zero_division=0)
+    print(f"\nTest metrics for selected model '{best['name']}' (evaluated once):")
+    print(f"  test_acc: {test_acc:.4f} | test_f1: {test_f1:.4f} | test_loss: {test_loss:.4f}")
 
     # Save report
     report = {
@@ -230,6 +262,7 @@ if __name__ == "__main__":
         "splits": {"train": len(X_train), "val": len(X_val), "test": len(X_test)},
         "models": [{k: v for k, v in r.items() if k != "history"} for r in results],
         "best_model": best["name"],
+        "best_model_test": {"test_acc": test_acc, "test_f1": test_f1, "test_loss": test_loss},
     }
     with open(MODELS_DIR / "comparison_report.json", "w") as f:
         json.dump(report, f, indent=2, default=str)

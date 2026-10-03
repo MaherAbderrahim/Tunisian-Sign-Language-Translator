@@ -4,6 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
+import pytest
+
 from src.languages.alphabet import SPELL_LABELS, INDEX_TO_LABEL, LABEL_TO_INDEX, TSLAlphabet
 
 
@@ -33,7 +35,8 @@ class TestAlphabetLabels:
 
     def test_class_names_txt_matches(self):
         class_names_path = Path(__file__).resolve().parent.parent / "data" / "alphabet" / "processed" / "class_names.txt"
-        if class_names_path.exists():
-            with open(class_names_path) as f:
-                file_labels = [l.strip() for l in f.readlines()]
-            assert file_labels == SPELL_LABELS
+        if not class_names_path.exists():
+            pytest.skip("class_names.txt not present")
+        with open(class_names_path) as f:
+            file_labels = [l.strip() for l in f.readlines()]
+        assert file_labels == SPELL_LABELS

@@ -117,6 +117,8 @@ class TestLLM:
         assert r.status_code == 200
 
     def test_correct(self, client):
+        if os.environ.get("RUN_NETWORK_TESTS") != "1":
+            pytest.skip("network tests disabled")
         r = client.post("/llm/correct", json={"text": "hello"})
         assert r.status_code == 200
         assert "corrected" in r.json()

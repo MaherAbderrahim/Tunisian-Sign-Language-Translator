@@ -40,7 +40,7 @@ tsl-translator/
 │   └── translation/translator.py   # Pipeline complet
 ├── api/main.py                     # API FastAPI
 ├── web/app.py                      # Interface Streamlit
-├── tests/test_all.py               # Tests unitaires
+├── tests/                          # Suite de tests automatisés (124 tests)
 ├── demo.py                         # Script de démonstration
 ├── requirements.txt                # Dépendances
 ├── Dockerfile                      # Docker

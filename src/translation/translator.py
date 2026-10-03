@@ -22,6 +22,8 @@ from collections import deque
 from typing import Optional, Dict, List
 from pathlib import Path
 import logging
+import threading
+import uuid
 
 from src.models.landmark_extractor import MediaPipeLandmarkExtractor
 from src.models.classifier import TSLClassifier, create_model
@@ -29,7 +31,7 @@ from src.models.spell_classifier import SpellClassifier
 from src.languages.dictionary import TSLDictionary
 from src.languages.alphabet import TSLAlphabet
 from src.config.settings import (
-    MODELS_DIR, NUM_CLASSES, DEFAULT_MODEL_PATH,
+    NUM_CLASSES, DEFAULT_MODEL_PATH,
     CONFIDENCE_THRESHOLD, TEMPORAL_SMOOTHING_WINDOW, HISTORY_MAX_LEN,
     ALPHABET_NUM_CLASSES, ALPHABET_MODELS_DIR, SPELL_GAP_FRAMES,
     UNSUPPORTED_SIGN_CLASSES,
@@ -45,8 +47,52 @@ except ImportError:
     LLMCorrector = None  # type: ignore
     LLMConfig = None  # type: ignore
 
-logging.basicConfig(level=logging.INFO)
+# Configure logging only if the embedding application hasn't (avoids hijacking
+# the root logger when this module is imported as a library).
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Shared read-only dictionary (static data; rebuilt per call was wasteful)
+_shared_dictionary: Optional[TSLDictionary] = None
+
+
+def get_shared_dictionary() -> TSLDictionary:
+    global _shared_dictionary
+    if _shared_dictionary is None:
+        _shared_dictionary = TSLDictionary()
+    return _shared_dictionary
+
+
+class SessionState:
+    """Mutable per-client state: smoothing deques, history, mode, spell buffers.
+
+    Models and MediaPipe detectors are shared read-only across sessions; only
+    this state is isolated, so concurrent API clients cannot corrupt each
+    other's predictions, history, mode or finger-spelling buffers.
+    """
+
+    def __init__(
+        self,
+        smoothing_window: int,
+        history_max_len: int,
+        spell_gap_frames: int,
+    ):
+        self.smoothing_window = max(1, int(smoothing_window))
+        self.history_max_len = int(history_max_len)
+        self.recent_predictions: deque = deque(maxlen=self.smoothing_window)
+        self.spell_recent_predictions: deque = deque(maxlen=self.smoothing_window)
+        self.history: deque = deque(maxlen=self.history_max_len)
+        self.mode_controller = ModeController()
+        self.spell_assembler = SpellAssembler(gap_frames=spell_gap_frames)
+
+    def set_smoothing_window(self, window: int) -> None:
+        w = max(1, int(window))
+        if w == self.smoothing_window:
+            return
+        self.smoothing_window = w
+        self.recent_predictions = deque(self.recent_predictions, maxlen=w)
+        self.spell_recent_predictions = deque(self.spell_recent_predictions, maxlen=w)
 
 
 class TSLTranslator:
@@ -105,18 +151,21 @@ class TSLTranslator:
         # Inference params
         self.confidence_threshold = confidence_threshold
         self.smoothing_window = max(1, int(smoothing_window))
-        self._recent_predictions: deque = deque(maxlen=self.smoothing_window)
 
-        # Bounded history
+        # Bounded history (lives inside each session)
         self.history_max_len = int(history_max_len)
-        self.translation_history: List[Dict] = []
 
         # Finger spelling components
         self.alphabet = TSLAlphabet()
-        self.mode_controller = ModeController()
-        self.spell_assembler = SpellAssembler(gap_frames=SPELL_GAP_FRAMES)
-        self._spell_recent_predictions: deque = deque(maxlen=self.smoothing_window)
         self.spell_model: Optional[SpellClassifier] = None
+
+        # Per-client session state + locks for shared, non-thread-safe resources
+        self._sessions: Dict[str, SessionState] = {}
+        self._sessions_lock = threading.Lock()
+        self._detect_lock = threading.Lock()
+
+        # Default session (single-user callers: Streamlit, demo, tests)
+        self.get_session()
 
         # Resolve model path
         if model_path is None:
@@ -141,6 +190,66 @@ class TSLTranslator:
             except Exception as e:
                 logger.warning(f"Failed to initialize LLM corrector: {e}")
 
+    # ── Session management ──────────────────────────────────────────────
+
+    def get_session(self, session_id: Optional[str] = None) -> SessionState:
+        """Return (creating if needed) the state container for a client."""
+        sid = session_id or "default"
+        with self._sessions_lock:
+            state = self._sessions.get(sid)
+            if state is None:
+                state = SessionState(
+                    self.smoothing_window,
+                    self.history_max_len,
+                    SPELL_GAP_FRAMES,
+                )
+                self._sessions[sid] = state
+            return state
+
+    def delete_session(self, session_id: Optional[str]) -> None:
+        """Drop a client's state (call on WebSocket disconnect)."""
+        if not session_id or session_id == "default":
+            return
+        with self._sessions_lock:
+            self._sessions.pop(session_id, None)
+
+    def _extract_features(self, frame: np.ndarray):
+        """Landmark extraction serialized across threads (MediaPipe Tasks
+        detectors are not documented as thread-safe)."""
+        with self._detect_lock:
+            return self.landmark_extractor.extract_features(frame)
+
+    def _draw_landmarks(self, frame: np.ndarray) -> np.ndarray:
+        with self._detect_lock:
+            return self.landmark_extractor.draw_landmarks(frame)
+
+    def set_inference_settings(
+        self,
+        confidence_threshold: Optional[float] = None,
+        smoothing_window: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """Update global inference settings (validated) across all sessions."""
+        if confidence_threshold is not None:
+            c = float(confidence_threshold)
+            if not 0.0 <= c <= 1.0:
+                raise ValueError("confidence_threshold must be between 0 and 1")
+            self.confidence_threshold = c
+        if smoothing_window is not None:
+            w = int(smoothing_window)
+            if not 1 <= w <= 60:
+                raise ValueError("smoothing_window must be between 1 and 60")
+            self.smoothing_window = w
+            with self._sessions_lock:
+                for state in self._sessions.values():
+                    state.set_smoothing_window(w)
+        return self.get_inference_settings()
+
+    def get_inference_settings(self) -> Dict[str, float]:
+        return {
+            "confidence_threshold": self.confidence_threshold,
+            "smoothing_window": self.smoothing_window,
+        }
+
     def _load_model(self, model_path: Optional[Path]) -> TSLClassifier:
         """
         Load trained model. The checkpoint's `class_names` (if present) becomes
@@ -153,7 +262,7 @@ class TSLTranslator:
             Loaded model in eval mode
         """
         if model_path and model_path.exists():
-            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
             model = create_model("landmark", NUM_CLASSES)
             model.load_state_dict(checkpoint['model_state_dict'])
             model = model.to(self.device)
@@ -195,7 +304,7 @@ class TSLTranslator:
             return None
 
         try:
-            checkpoint = torch.load(spell_path, map_location=self.device, weights_only=False)
+            checkpoint = torch.load(spell_path, map_location=self.device, weights_only=True)
             state_dict = checkpoint.get('model_state_dict', checkpoint)
 
             # Detect architecture from state_dict keys
@@ -222,6 +331,7 @@ class TSLTranslator:
         self,
         frame: np.ndarray,
         return_all: bool = True,
+        session_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """
         Translate a single frame, applying confidence thresholding and
@@ -231,13 +341,18 @@ class TSLTranslator:
         Args:
             frame: BGR image
             return_all: unused (kept for API compatibility)
+            session_id: client session whose smoothing/history is updated
 
         Returns:
             Dictionary with translations. On rejection (no hands or low
             confidence) returns {"error": ...} or {"tsl": None, ...}.
+            Every result carries "mode_label": the raw predicted class label
+            (before UNSUPPORTED_SIGN_CLASSES filtering), used for mode control.
         """
+        state = self.get_session(session_id)
+
         # 1. Extract landmarks
-        features = self.landmark_extractor.extract_features(frame)
+        features = self._extract_features(frame)
         if features is None:
             return {"error": "No hands detected"}
 
@@ -252,12 +367,12 @@ class TSLTranslator:
 
         # 3. Apply confidence threshold BEFORE recording for smoothing
         if confidence < self.confidence_threshold:
-            self._recent_predictions.append(None)
+            state.recent_predictions.append(None)
         else:
-            self._recent_predictions.append(predicted_class)
+            state.recent_predictions.append(predicted_class)
 
         # 4. Temporal smoothing via majority vote over accepted predictions
-        accepted = [p for p in self._recent_predictions if p is not None]
+        accepted = [p for p in state.recent_predictions if p is not None]
         if not accepted:
             translations = {
                 "tsl": None,
@@ -265,10 +380,12 @@ class TSLTranslator:
                 "french": None,
                 "english": None,
                 "arabic": None,
+                "arabic_msa": None,
                 "confidence": confidence,
                 "rejected": True,
+                "mode_label": None,
             }
-            self._append_history(translations)
+            self._append_history(translations, state)
             return translations
 
         # Find the majority label among the accepted window
@@ -276,6 +393,14 @@ class TSLTranslator:
         for cls in accepted:
             counts[cls] = counts.get(cls, 0) + 1
         smoothed_class = max(counts, key=counts.get)
+
+        # Raw label (used for mode control even when the class itself has no
+        # training data, e.g. the ta3raf mode-switch sign)
+        raw_label = (
+            self.class_names[smoothed_class]
+            if 0 <= smoothed_class < len(self.class_names)
+            else None
+        )
 
         # Confidence reported is the current-frame confidence (informational),
         # but the *label* is the smoothed majority — keeps things stable.
@@ -287,10 +412,12 @@ class TSLTranslator:
                 "french": None,
                 "english": None,
                 "arabic": None,
+                "arabic_msa": None,
                 "confidence": confidence,
                 "rejected": True,
+                "mode_label": raw_label,
             }
-            self._append_history(translations)
+            self._append_history(translations, state)
             return translations
 
         translations = self.dictionary.get_all_translations(tsl_label)
@@ -298,20 +425,23 @@ class TSLTranslator:
         translations["smoothed_count"] = counts[smoothed_class]
         translations["smoothed_window"] = len(accepted)
         translations["rejected"] = False
+        translations["mode_label"] = raw_label
 
-        self._append_history(translations)
+        self._append_history(translations, state)
         return translations
 
     def spell_frame(
         self,
         frame: np.ndarray,
         return_all: bool = True,
+        session_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """
         Recognize a finger spelling letter from a single frame.
 
         Args:
             frame: BGR image
+            session_id: client session whose smoothing is updated
 
         Returns:
             Dict with letter info: {letter, arabic, confidence, ...}
@@ -319,8 +449,10 @@ class TSLTranslator:
         if self.spell_model is None:
             return {"error": "Spell model not loaded"}
 
+        state = self.get_session(session_id)
+
         # 1. Extract landmarks
-        features = self.landmark_extractor.extract_features(frame)
+        features = self._extract_features(frame)
         if features is None:
             return {"error": "No hands detected"}
 
@@ -335,12 +467,12 @@ class TSLTranslator:
 
         # 3. Apply confidence threshold
         if confidence < self.confidence_threshold:
-            self._spell_recent_predictions.append(None)
+            state.spell_recent_predictions.append(None)
         else:
-            self._spell_recent_predictions.append(predicted_class)
+            state.spell_recent_predictions.append(predicted_class)
 
         # 4. Temporal smoothing
-        accepted = [p for p in self._spell_recent_predictions if p is not None]
+        accepted = [p for p in state.spell_recent_predictions if p is not None]
         if not accepted:
             return {
                 "letter": None,
@@ -379,6 +511,7 @@ class TSLTranslator:
     def translate_frame_multi_mode(
         self,
         frame: np.ndarray,
+        session_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """
         Translate a frame using the current mode (sign or spell).
@@ -388,23 +521,28 @@ class TSLTranslator:
             Dict with either sign translations or spell letter info,
             plus mode state.
         """
-        # First, always try to recognize as a sign (to detect mode switches)
-        sign_result = self.translate_frame(frame)
+        state = self.get_session(session_id)
 
-        # Check if this sign triggers a mode change
-        if not sign_result.get("rejected") and sign_result.get("tsl"):
-            mode_event = self.mode_controller.update(sign_result["tsl"])
+        # First, always try to recognize as a sign (to detect mode switches)
+        sign_result = self.translate_frame(frame, session_id=session_id)
+
+        # Check if this sign triggers a mode change. Use the raw predicted
+        # label (mode_label) so control signs with no training data (ta3raf)
+        # still switch mode even though they translate to nothing.
+        control_label = sign_result.get("mode_label") or sign_result.get("tsl")
+        if control_label:
+            mode_event = state.mode_controller.update(control_label)
             if mode_event["consumed"]:
                 # Mode changed - return mode change event
                 return {
                     "type": "mode_change",
                     "mode": mode_event["mode"],
                     "action": mode_event["action"],
-                    "sign": sign_result["tsl"],
+                    "sign": control_label,
                 }
 
         # If in spell mode, use spell classifier
-        if self.mode_controller.is_spell_mode:
+        if state.mode_controller.is_spell_mode:
             if self.spell_model is None:
                 return {
                     "type": "error",
@@ -412,15 +550,13 @@ class TSLTranslator:
                     "mode": "spell",
                 }
 
-            spell_result = self.spell_frame(frame)
+            spell_result = self.spell_frame(frame, session_id=session_id)
 
             # Feed to assembler
             if spell_result.get("letter") and not spell_result.get("rejected"):
-                assembly = self.spell_assembler.feed_letter(spell_result["letter"])
-            elif spell_result.get("rejected"):
-                assembly = self.spell_assembler.on_empty_frame()
+                assembly = state.spell_assembler.feed_letter(spell_result["letter"])
             else:
-                assembly = self.spell_assembler.on_empty_frame()
+                assembly = state.spell_assembler.on_empty_frame()
 
             return {
                 "type": "spell",
@@ -450,11 +586,11 @@ class TSLTranslator:
             return None
         return label
 
-    def _append_history(self, entry: Dict) -> None:
-        """Append entry to bounded history (drops oldest when full)."""
-        self.translation_history.append(entry)
-        if len(self.translation_history) > self.history_max_len:
-            self.translation_history = self.translation_history[-self.history_max_len:]
+    def _append_history(
+        self, entry: Dict, state: Optional[SessionState] = None
+    ) -> None:
+        """Append entry to a session's bounded history (default session)."""
+        (state or self.get_session()).history.append(entry)
 
     def translate_video_stream(
         self,
@@ -477,6 +613,7 @@ class TSLTranslator:
         recognizer = StreamingRecognizer()
         builder = SentenceBuilder(self.dictionary, target_lang=self.output_lang)
         current_sentence_labels: List[str] = []
+        state = self.get_session()
 
         try:
             while True:
@@ -485,7 +622,7 @@ class TSLTranslator:
                     break
 
                 # Use multi-mode translation
-                result = self.translate_frame_multi_mode(frame)
+                result = self.translate_frame_multi_mode(frame, session_id="default")
 
                 # Handle mode change
                 if result.get("type") == "mode_change":
@@ -502,14 +639,15 @@ class TSLTranslator:
 
                     # Draw spell results
                     if show_landmarks:
-                        frame = self.landmark_extractor.draw_landmarks(frame)
+                        frame = self._draw_landmarks(frame)
                     frame = self._draw_spell_results(frame, result)
                     cv2.imshow(window_name, frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
                         break
-                    if cv2.waitKey(1) & 0xFF == ord('s'):
-                        self.mode_controller.toggle()
-                        logger.info(f"MODE: {self.mode_controller.mode.upper()}")
+                    if key == ord('s'):
+                        new_mode = state.mode_controller.toggle()
+                        logger.info(f"MODE: {new_mode.upper()}")
                     continue
 
                 # Handle sign mode output
@@ -536,13 +674,14 @@ class TSLTranslator:
                     if "error" not in result and not result.get("rejected"):
                         frame = self._draw_results(frame, result)
                     if show_landmarks:
-                        frame = self.landmark_extractor.draw_landmarks(frame)
+                        frame = self._draw_landmarks(frame)
                     cv2.imshow(window_name, frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
                         break
-                    if cv2.waitKey(1) & 0xFF == ord('s'):
-                        self.mode_controller.toggle()
-                        logger.info(f"MODE: {self.mode_controller.mode.upper()}")
+                    if key == ord('s'):
+                        new_mode = state.mode_controller.toggle()
+                        logger.info(f"MODE: {new_mode.upper()}")
         finally:
             cap.release()
             cv2.destroyAllWindows()
@@ -607,13 +746,6 @@ class TSLTranslator:
 
         return frame_copy
 
-    def translate_image(self, image_path: str) -> Dict:
-        """Translate a single image file."""
-        frame = cv2.imread(image_path)
-        if frame is None:
-            return {"error": f"Cannot read image: {image_path}"}
-        return self.translate_frame(frame)
-
     def translate_video_file(
         self,
         video_path: str,
@@ -645,6 +777,9 @@ class TSLTranslator:
         extra_langs = extra_langs or ["en", "fr"]
         sentences: List[Dict] = []
         frame_idx = 0
+        # Private session: smoothing/history of this file never leaks into
+        # (or is polluted by) other concurrent requests.
+        vid_sid = f"video:{uuid.uuid4().hex}"
 
         try:
             while True:
@@ -654,11 +789,12 @@ class TSLTranslator:
                 if sample_every_n_frames > 1 and frame_idx % sample_every_n_frames != 0:
                     frame_idx += 1
                     continue
-                result = self.translate_frame(frame)
+                result = self.translate_frame(frame, session_id=vid_sid)
                 event = recognizer.feed(result)
                 if event["sign"] is not None:
                     builder.add_sign(event["sign"])
                 if event["sentence_boundary"]:
+                    signs = list(builder.signs_seq)
                     sentence = builder.flush()
                     if sentence:
                         translations = {}
@@ -668,14 +804,16 @@ class TSLTranslator:
                             )
                         sentences.append({
                             "sentence": sentence,
-                            "signs": list(builder.signs_seq),
+                            "signs": signs,
                             "translations": translations,
                         })
                 frame_idx += 1
         finally:
             cap.release()
+            self.delete_session(vid_sid)
 
         # Flush remaining
+        signs = list(builder.signs_seq)
         sentence = builder.flush()
         if sentence:
             translations = {}
@@ -685,7 +823,7 @@ class TSLTranslator:
                 )
             sentences.append({
                 "sentence": sentence,
-                "signs": [],
+                "signs": signs,
                 "translations": translations,
             })
         logger.info(f"Video {video_path}: produced {len(sentences)} sentences from {frame_idx} frames")
@@ -695,28 +833,29 @@ class TSLTranslator:
         """Translate multiple frames."""
         return [self.translate_frame(f) for f in frames]
 
-    def get_history(self) -> List[Dict]:
-        """Get translation history (bounded)."""
-        return self.translation_history
+    def get_history(self, session_id: Optional[str] = None) -> List[Dict]:
+        """Get translation history for a session (bounded, copy)."""
+        return list(self.get_session(session_id).history)
 
-    def clear_history(self):
-        """Clear translation history and spell state."""
-        self.translation_history = []
-        self._recent_predictions.clear()
-        self._spell_recent_predictions.clear()
-        self.spell_assembler.reset()
+    def clear_history(self, session_id: Optional[str] = None) -> None:
+        """Clear translation history and spell state for a session."""
+        state = self.get_session(session_id)
+        state.history.clear()
+        state.recent_predictions.clear()
+        state.spell_recent_predictions.clear()
+        state.spell_assembler.reset()
 
-    def get_mode_state(self) -> Dict[str, str]:
-        """Get current mode controller state."""
-        return self.mode_controller.get_state()
+    def get_mode_state(self, session_id: Optional[str] = None) -> Dict[str, str]:
+        """Get current mode controller state for a session."""
+        return self.get_session(session_id).mode_controller.get_state()
 
-    def toggle_mode(self) -> str:
+    def toggle_mode(self, session_id: Optional[str] = None) -> str:
         """Toggle between sign and spell mode. Returns new mode."""
-        return self.mode_controller.toggle()
+        return self.get_session(session_id).mode_controller.toggle()
 
-    def flush_spell(self) -> str:
+    def flush_spell(self, session_id: Optional[str] = None) -> str:
         """Flush the spell assembler and return the assembled sentence."""
-        return self.spell_assembler.flush()
+        return self.get_session(session_id).spell_assembler.flush()
 
     async def correct_with_llm(self, raw_text: str) -> str:
         """Correct raw text using the LLM corrector (async)."""
@@ -725,15 +864,22 @@ class TSLTranslator:
         return raw_text
 
     def correct_with_llm_sync(self, raw_text: str) -> str:
-        """Synchronous wrapper for LLM correction."""
+        """Synchronous wrapper for LLM correction.
+
+        Safe to call from any thread. If the calling thread already runs an
+        event loop, the correction cannot be awaited there — the raw text is
+        returned unchanged instead of raising RuntimeError.
+        """
         import asyncio
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                return raw_text
-            return loop.run_until_complete(self.correct_with_llm(raw_text))
+            asyncio.get_running_loop()
         except RuntimeError:
-            return raw_text
+            return asyncio.run(self.correct_with_llm(raw_text))
+        logger.warning(
+            "correct_with_llm_sync called from a running event loop; "
+            "returning uncorrected text"
+        )
+        return raw_text
 
     def configure_llm(self, provider: str, api_key: str, model: str = "", base_url: str = ""):
         """Reconfigure the LLM corrector at runtime."""
@@ -744,8 +890,11 @@ class TSLTranslator:
         from src.translation.llm_corrector import LLMProvider
         try:
             provider_enum = LLMProvider(provider)
-        except ValueError:
-            provider_enum = LLMProvider.CUSTOM
+        except ValueError as e:
+            raise ValueError(
+                f"Unknown LLM provider '{provider}'. Valid options: "
+                + ", ".join(p.value for p in LLMProvider)
+            ) from e
         config = LLMConfig(
             provider=provider_enum,
             api_key=api_key,
@@ -753,6 +902,7 @@ class TSLTranslator:
             base_url=base_url,
         )
         config.apply_defaults()
+        config.validate()  # raises ValueError on unsafe/invalid base_url
         if self.llm_corrector is None:
             self.llm_corrector = LLMCorrector(config)
         else:
@@ -781,11 +931,11 @@ class TSLTranslator:
 
 def translate_text_to_tsl(text: str) -> Optional[str]:
     """Translate Tunisian-dialect text to a TSL label (case-insensitive)."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     return dictionary.tunisian_to_tsl.get(text.lower())
 
 
 def translate_tsl_to_text(tsl_label: str) -> Dict[str, str]:
     """Translate a TSL label to text in all languages."""
-    dictionary = TSLDictionary()
+    dictionary = get_shared_dictionary()
     return dictionary.get_all_translations(tsl_label)

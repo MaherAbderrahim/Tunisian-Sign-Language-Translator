@@ -6,24 +6,33 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import torch
 import numpy as np
+import pytest
 from src.translation.translator import TSLTranslator
 from src.translation.spell_assembler import SpellAssembler
 from src.translation.mode_controller import ModeController
 from src.models.spell_classifier import SpellClassifier
 from src.languages.alphabet import SPELL_LABELS
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SPELL_CKPT = _REPO_ROOT / "models" / "alphabet" / "spell_classifier_best.pth"
+_X_TEST_NPY = _REPO_ROOT / "data" / "alphabet" / "processed" / "X_test.npy"
+_Y_TEST_NPY = _REPO_ROOT / "data" / "alphabet" / "processed" / "y_test.npy"
+
 
 class TestEndToEnd:
     def test_translator_init(self):
+        if not _SPELL_CKPT.exists():
+            pytest.skip("model checkpoint not present")
         t = TSLTranslator()
         assert t.model is not None
         assert t.spell_model is not None
         assert len(t.alphabet) == 31
 
     def test_spell_model_inference(self):
+        if not _SPELL_CKPT.exists():
+            pytest.skip("model checkpoint not present")
         model = SpellClassifier(num_classes=31, architecture="mlp")
-        model_path = Path(__file__).resolve().parent.parent / "models" / "alphabet" / "spell_classifier_best.pth"
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(_SPELL_CKPT, map_location="cpu", weights_only=True)
         model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
         model.eval()
         x = torch.randn(1, 126)
@@ -35,16 +44,18 @@ class TestEndToEnd:
         assert 0 <= conf.item() <= 1
 
     def test_label_mapping(self):
+        if not _SPELL_CKPT.exists():
+            pytest.skip("model checkpoint not present")
+        if not _X_TEST_NPY.exists() or not _Y_TEST_NPY.exists():
+            pytest.skip("processed alphabet test data not present")
         model = SpellClassifier(num_classes=31, architecture="mlp")
-        model_path = Path(__file__).resolve().parent.parent / "models" / "alphabet" / "spell_classifier_best.pth"
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(_SPELL_CKPT, map_location="cpu", weights_only=True)
         model.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
         model.eval()
 
         # Load test data
-        data_dir = Path(__file__).resolve().parent.parent / "data" / "alphabet" / "processed"
-        X_test = np.load(data_dir / "X_test.npy")
-        y_test = np.load(data_dir / "y_test.npy")
+        X_test = np.load(_X_TEST_NPY)
+        y_test = np.load(_Y_TEST_NPY)
 
         # Run inference on a few samples
         X_tensor = torch.FloatTensor(X_test[:10])

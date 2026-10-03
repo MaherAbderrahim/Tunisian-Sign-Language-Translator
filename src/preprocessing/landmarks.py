@@ -76,7 +76,11 @@ def extract_landmarks_sequence(
             frame_idx += 1
             continue
 
-        features = extractor.extract_landmarks(frame)
+        # extract_features flattens + pads to a fixed 126-vector, so stacking
+        # is always safe even when the number of detected hands varies between
+        # frames. normalize=False because normalize_landmarks_sequence does its
+        # own wrist-centering downstream.
+        features = extractor.extract_features(frame, normalize=False)
         if features is not None:
             landmarks_list.append(features)
 
@@ -111,7 +115,8 @@ def extract_landmarks_from_frames(
     extractor = MediaPipeLandmarkExtractor(min_detection_confidence=min_detection_confidence)
     result = []
     for frame in frames:
-        features = extractor.extract_landmarks(frame)
+        # Same 126-row contract as extract_landmarks_sequence (see above).
+        features = extractor.extract_features(frame, normalize=False)
         if features is not None:
             result.append(features)
     if not result:

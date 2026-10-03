@@ -28,6 +28,8 @@ class TestLLMCorrector:
         assert result == ""
 
     def test_wrong_api_key_fallback(self):
+        if os.environ.get("RUN_NETWORK_TESTS") != "1":
+            pytest.skip("network tests disabled")
         config = LLMConfig(provider="openrouter", api_key="sk-invalid-key", model="test")
         corrector = LLMCorrector(config)
         result = asyncio.run(corrector.correct("hello"))

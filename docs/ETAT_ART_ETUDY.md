@@ -171,6 +171,9 @@
 
 ### 4.1 Structure du Projet
 
+> **Proposition (non implémentée)** — arborescence initialement prévue lors de l'étude.
+> Elle ne correspond pas au dépôt réel : voir la section « Structure du projet » du `README.md`.
+
 ```
 tsl-translator/
 ├── README.md
@@ -341,7 +344,7 @@ class TSLTranslator:
 - [ ] README complet
 - [ ] Documentation API
 - [ ] Notebooks d'exemple
-- [ ] Dockerisation
+- [x] Dockerisation (Dockerfile + docker-compose.yml présents dans le dépôt)
 
 ---
 

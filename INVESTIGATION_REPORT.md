@@ -155,7 +155,7 @@ Frontend
 ### Étape 1 : Lancer l'application
 
 ```bash
-cd D:\Stage\Tunisian-Sign-Language-Translator
+cd Tunisian-Sign-Language-Translator
 python start.py
 ```
 

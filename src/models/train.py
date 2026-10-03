@@ -3,6 +3,7 @@ Training script for TSL Classifier
 """
 
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -21,6 +22,15 @@ from src.config.settings import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _set_seed(seed: int = 42) -> None:
+    """Seed python/numpy/torch RNGs so runs are reproducible."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class TSLDataset(Dataset):
@@ -290,7 +300,7 @@ class TSLTrainer:
         Args:
             path: Load path
         """
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.history = checkpoint['history']
@@ -304,6 +314,7 @@ def train_tsl_classifier(
     batch_size: int = BATCH_SIZE,
     num_epochs: int = NUM_EPOCHS,
     save_best: bool = True,
+    allow_dummy: bool = False,
 ) -> dict:
     """
     Main training function.
@@ -316,13 +327,21 @@ def train_tsl_classifier(
         batch_size: Batch size
         num_epochs: Number of epochs
         save_best: Save the best-val-acc checkpoint with class_names embedded
+        allow_dummy: Opt-in escape hatch — train on random dummy data when no
+            processed data exists (smoke tests only; never for real training)
 
     Returns:
         Training history
     """
+    _set_seed(42)
+
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
+
+    # Pre-split files written by scripts/prepare_data.py: originals are split
+    # before augmentation, so no augmented sibling leaks into the val fold.
+    use_default_paths = features_path is None and labels_path is None
 
     # Default paths
     if features_path is None:
@@ -332,15 +351,45 @@ def train_tsl_classifier(
     if class_names_path is None:
         class_names_path = PROCESSED_DATA_DIR / "class_names.txt"
 
+    split_paths = [
+        PROCESSED_DATA_DIR / "X_train.npy",
+        PROCESSED_DATA_DIR / "y_train.npy",
+        PROCESSED_DATA_DIR / "X_val.npy",
+        PROCESSED_DATA_DIR / "y_val.npy",
+    ]
+    pre_split = use_default_paths and all(p.exists() for p in split_paths)
+
     # Load data
-    if features_path.exists() and labels_path.exists():
+    if pre_split:
+        X_train, y_train, X_val, y_val = (np.load(p) for p in split_paths)
+        logger.info(
+            f"Loaded pre-split data: train {X_train.shape}/{y_train.shape}, "
+            f"val {X_val.shape}/{y_val.shape}"
+        )
+        features = np.concatenate([X_train, X_val])
+        labels = np.concatenate([y_train, y_val])
+    elif features_path.exists() and labels_path.exists():
         features = np.load(features_path)
         labels = np.load(labels_path)
         logger.info(f"Loaded features {features.shape}, labels {labels.shape}")
-    else:
         logger.warning(
-            "Processed data not found — using DUMMY data. "
-            "Run `python scripts/prepare_data.py` first for real training."
+            "Legacy features.npy/labels.npy detected — falling back to a random "
+            "train/val split. If this data was augmented BEFORE splitting, "
+            "augmented siblings leak across folds and val accuracy is inflated; "
+            "re-run `python scripts/prepare_data.py` to get proper X_/y_ splits."
+        )
+    else:
+        if not allow_dummy:
+            raise FileNotFoundError(
+                f"Processed data not found: expected {features_path} "
+                f"(or {split_paths[0].parent}/X_train.npy). "
+                "Run `python scripts/prepare_data.py` first "
+                "(or pass allow_dummy=True for a smoke test)."
+            )
+        logger.warning(
+            "Processed data not found — using DUMMY data because "
+            "allow_dummy=True. Run `python scripts/prepare_data.py` first "
+            "for real training."
         )
         features = np.random.randn(1000, 126).astype(np.float32)
         labels = np.random.randint(0, num_classes, 1000)
@@ -359,17 +408,18 @@ def train_tsl_classifier(
             )
             num_classes = len(class_names)
 
-    # Split data (stratified if possible)
-    from sklearn.model_selection import train_test_split
-    try:
-        X_train, X_val, y_train, y_val = train_test_split(
-            features, labels, test_size=0.2, random_state=42, stratify=labels
-        )
-    except ValueError:
-        # Some classes may have too few samples for stratification
-        X_train, X_val, y_train, y_val = train_test_split(
-            features, labels, test_size=0.2, random_state=42
-        )
+    # Split data (stratified if possible) — skipped when pre-split files exist
+    if not pre_split:
+        from sklearn.model_selection import train_test_split
+        try:
+            X_train, X_val, y_train, y_val = train_test_split(
+                features, labels, test_size=0.2, random_state=42, stratify=labels
+            )
+        except ValueError:
+            # Some classes may have too few samples for stratification
+            X_train, X_val, y_train, y_val = train_test_split(
+                features, labels, test_size=0.2, random_state=42
+            )
 
     # Create datasets & loaders
     train_dataset = TSLDataset(X_train, y_train)
@@ -428,6 +478,16 @@ def train_tsl_classifier(
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train TSL classifier")
+    parser.add_argument(
+        "--allow-dummy", action="store_true",
+        help="Allow training on random dummy data when no processed data exists "
+             "(smoke test only)",
+    )
+    cli_args = parser.parse_args()
+
     # Run training
-    history = train_tsl_classifier()
+    history = train_tsl_classifier(allow_dummy=cli_args.allow_dummy)
     print("Training completed!")

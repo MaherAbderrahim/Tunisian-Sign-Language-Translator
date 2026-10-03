@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import random
 import sys
 import json
 import time
@@ -39,6 +40,15 @@ from src.models.spell_classifier import SpellClassifier
 from src.languages.alphabet import TSLAlphabet
 
 
+def _set_seed(seed: int = 42) -> None:
+    """Seed python/numpy/torch RNGs so runs are reproducible."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def load_data():
     """Load processed alphabet dataset."""
     features_path = ALPHABET_PROCESSED_DIR / "features.npy"
@@ -58,6 +68,7 @@ def load_data():
 
 def train_model(args):
     """Train the spell classifier."""
+    _set_seed(42)
     print("=" * 60)
     print("Training Spell Classifier (Version A)")
     print("=" * 60)
@@ -176,7 +187,19 @@ def train_model(args):
     # Final save
     save_checkpoint(model, optimizer, epoch, history, "final")
 
-    # Test evaluation
+    # Test evaluation on the BEST checkpoint (reloaded from disk), not on the
+    # in-memory final-epoch weights — otherwise we report a model that was
+    # never deployed.
+    best_path = ALPHABET_MODELS_DIR / "spell_classifier_best.pth"
+    if best_path.exists():
+        checkpoint = torch.load(best_path, map_location=device, weights_only=True)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        print(f"\nReloaded best checkpoint from {best_path} "
+              f"(epoch {checkpoint.get('epoch')})")
+    else:
+        print(f"\nWARNING: no best checkpoint at {best_path} — "
+              "evaluating the final-epoch model instead")
+
     print()
     print("=" * 60)
     print("Test Evaluation")

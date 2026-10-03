@@ -101,7 +101,7 @@ def main():
     print("\nTo run the full application:")
     print("  - Web interface: streamlit run web/app.py")
     print("  - API server: uvicorn api.main:app --reload")
-    print("  - Camera demo: python -m src.translation.translator")
+    print("  - Camera demo: python start.py")
 
 
 if __name__ == "__main__":

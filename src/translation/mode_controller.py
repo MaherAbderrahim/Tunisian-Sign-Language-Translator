@@ -3,7 +3,7 @@ Mode Controller - Switches between sign recognition and finger spelling modes.
 
 Two modes:
   - SIGN: standard 57-sign recognition (existing pipeline)
-  - SPELL: finger spelling with 36-letter alphabet
+  - SPELL: finger spelling with 31-label alphabet
 
 Mode is toggled by:
   - Special TSL signs (SPELL_ON / SPELL_OFF)

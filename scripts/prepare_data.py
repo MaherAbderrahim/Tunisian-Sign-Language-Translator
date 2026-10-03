@@ -9,7 +9,10 @@ This script:
   - Maps dataset folder names (incl. the "métro" mojibake) to canonical TSL
     labels via TSLDictionary
   - Extracts MediaPipe landmarks per image
-  - Saves features.npy / labels.npy / class_names.txt
+  - Splits the ORIGINALS 80/20 (train/val) and augments ONLY the train fold
+  - Saves features.npy / labels.npy / class_names.txt (legacy: raw originals)
+    plus X_train.npy / y_train.npy / X_val.npy / y_val.npy (augmented train,
+    held-out val)
 
 `class_names.txt` is the single source of truth for the class-index mapping
 that MUST be persisted into the trained checkpoint (see `train.py`).
@@ -311,18 +314,42 @@ def main():
         print("  python scripts/download_data.py")
         return
 
-    print("\nBalancing + augmenting data (target 200/class)...")
+    # Split ORIGINALS first, then augment ONLY the train fold. Augmenting the
+    # whole dataset before splitting would scatter augmented siblings of the
+    # same original across both folds (data leakage -> inflated val accuracy).
+    from sklearn.model_selection import train_test_split
+    print("\nSplitting originals 80/20 (stratified, random_state=42)...")
+    try:
+        X_train, X_val, y_train, y_val = train_test_split(
+            features, labels, test_size=0.2, random_state=42, stratify=labels
+        )
+    except ValueError:
+        # Some classes may have too few samples for stratification
+        X_train, X_val, y_train, y_val = train_test_split(
+            features, labels, test_size=0.2, random_state=42
+        )
+    print(f"Train fold: {len(X_train)} | Val fold: {len(X_val)}")
+
+    print("\nBalancing + augmenting TRAIN fold only (target 200/class)...")
     aug_features, aug_labels = create_augmented_data(
-        features, labels, augmentation_factor=2, target_per_class=200
+        X_train, y_train, augmentation_factor=2, target_per_class=200
     )
     print(f"Original size: {len(features)}")
-    print(f"Balanced+augmented size: {len(aug_features)}")
+    print(f"Train fold after balancing+augmentation: {len(aug_features)}")
     from collections import Counter
     counts = Counter(aug_labels.tolist())
     print(f"Per-class range after balancing: min={min(counts.values())} max={max(counts.values())}")
 
     print("\nSaving processed data...")
-    save_processed_data(aug_features, aug_labels, class_names)
+    # Legacy files keep their original meaning: the unaugmented originals.
+    save_processed_data(features, labels, class_names)
+
+    # Explicit splits: train = augmented originals, val = held-out originals.
+    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    np.save(PROCESSED_DATA_DIR / "X_train.npy", aug_features)
+    np.save(PROCESSED_DATA_DIR / "y_train.npy", aug_labels)
+    np.save(PROCESSED_DATA_DIR / "X_val.npy", X_val)
+    np.save(PROCESSED_DATA_DIR / "y_val.npy", y_val)
 
     print("\n" + "=" * 60)
     print("Dataset preparation complete!")

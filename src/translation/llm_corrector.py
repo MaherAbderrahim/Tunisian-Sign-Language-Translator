@@ -3,11 +3,12 @@ LLM Corrector — configurable multi-provider LLM for sentence correction.
 Supports: OpenRouter, OpenAI, Anthropic, Ollama (local), custom endpoints.
 """
 import os
-import json
+import asyncio
 import logging
+import urllib.parse
 import httpx
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,108 @@ class LLMConfig:
         if not self.model:
             self.model = defaults.get("model", "")
 
+    @staticmethod
+    def custom_urls_allowed() -> bool:
+        """Operator opt-in for arbitrary/remote endpoints (SSRF guard)."""
+        return os.getenv("LLM_ALLOW_CUSTOM_BASE_URL", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+
+    @staticmethod
+    def _host_allowed(host: str) -> bool:
+        allowed = {
+            h.strip().lower()
+            for h in os.getenv("LLM_ALLOWED_HOSTS", "").split(",")
+            if h.strip()
+        }
+        return not allowed or host in allowed
+
+    @staticmethod
+    def _is_loopback(host: str) -> bool:
+        return host == "localhost" or host.endswith(".localhost") or host in (
+            "127.0.0.1", "::1", "0:0:0:0:0:0:0:1",
+        )
+
+    def validate(self) -> "LLMConfig":
+        """Reject unsafe or incomplete configurations (raises ValueError).
+
+        The POST /llm/config endpoint previously let any caller point the
+        server at an arbitrary URL (SSRF). Now:
+          * known providers are pinned to their official base_url unless the
+            operator explicitly opted in via LLM_ALLOW_CUSTOM_BASE_URL;
+          * provider 'custom' requires base_url and that opt-in (or an
+            LLM_ALLOWED_HOSTS allow-list match);
+          * http is accepted only for loopback hosts (LAN Ollama needs the
+            opt-in flag);
+          * credentials embedded in the URL are rejected.
+        """
+        allow_custom = self.custom_urls_allowed()
+
+        if self.base_url:
+            parts = urllib.parse.urlsplit(self.base_url)
+            if parts.scheme not in ("http", "https"):
+                raise ValueError(
+                    f"base_url must use http or https, got '{parts.scheme}'"
+                )
+            if "@" in (parts.netloc or ""):
+                raise ValueError("base_url must not embed credentials")
+            host = (parts.hostname or "").lower()
+            if not host:
+                raise ValueError("base_url has no host")
+            if parts.scheme == "http" and not self._is_loopback(host):
+                if not allow_custom:
+                    raise ValueError(
+                        "http is only allowed for localhost; use https or set "
+                        "LLM_ALLOW_CUSTOM_BASE_URL=true"
+                    )
+            if not self._host_allowed(host):
+                raise ValueError(
+                    f"base_url host '{host}' is not in LLM_ALLOWED_HOSTS"
+                )
+
+        if self.provider == LLMProvider.CUSTOM:
+            if not self.base_url:
+                raise ValueError(
+                    "provider 'custom' requires base_url (and the "
+                    "LLM_ALLOW_CUSTOM_BASE_URL=true opt-in, or an "
+                    "LLM_ALLOWED_HOSTS entry)"
+                )
+            if not allow_custom and not os.getenv("LLM_ALLOWED_HOSTS", "").strip():
+                raise ValueError(
+                    "custom base_url is disabled: set "
+                    "LLM_ALLOW_CUSTOM_BASE_URL=true (or LLM_ALLOWED_HOSTS) "
+                    "on the server to opt in"
+                )
+        else:
+            expected = self.PROVIDER_DEFAULTS[self.provider].get("base_url", "")
+            if (
+                expected
+                and self.base_url
+                and self.base_url.rstrip("/") != expected.rstrip("/")
+            ):
+                if not allow_custom:
+                    raise ValueError(
+                        f"provider '{self.provider.value}' is pinned to "
+                        f"{expected}; use provider 'custom' (with "
+                        "LLM_ALLOW_CUSTOM_BASE_URL=true) for other endpoints"
+                    )
+            if not self.base_url:
+                raise ValueError(
+                    f"provider '{self.provider.value}' requires a base_url"
+                )
+
+        if not self.model:
+            raise ValueError("model is required")
+        if not 0.0 <= float(self.temperature) <= 2.0:
+            raise ValueError("temperature must be between 0 and 2")
+        if not 1 <= int(self.max_tokens) <= 32000:
+            raise ValueError("max_tokens must be between 1 and 32000")
+        if not 1 <= int(self.timeout) <= 300:
+            raise ValueError("timeout must be between 1 and 300 seconds")
+        if not isinstance(self.api_key, str):
+            raise ValueError("api_key must be a string")
+        return self
+
     @classmethod
     def from_env(cls) -> "LLMConfig":
         provider_str = os.getenv("LLM_PROVIDER", "openrouter").lower()
@@ -80,6 +183,7 @@ class LLMConfig:
             timeout=int(os.getenv("LLM_TIMEOUT", "10")),
         )
         config.apply_defaults()
+        config.validate()
         return config
 
     def to_dict(self) -> dict:
@@ -124,10 +228,15 @@ class LLMCorrector:
         return self._enabled
 
     def configure(self, config: LLMConfig):
+        config.validate()
         self.config = config
         self._enabled = bool(config.api_key) or config.provider == LLMProvider.OLLAMA
-        if self._client:
-            self._client = None  # Reset client on reconfigure
+        old, self._client = self._client, None  # drop old client
+        if old is not None and not old.is_closed:
+            try:
+                asyncio.get_running_loop().create_task(old.aclose())
+            except RuntimeError:
+                asyncio.run(old.aclose())  # called from a non-async thread
 
     def get_config(self) -> dict:
         return self.config.to_dict()

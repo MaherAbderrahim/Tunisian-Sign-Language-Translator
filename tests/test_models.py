@@ -6,6 +6,7 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import torch
 import numpy as np
+import pytest
 from src.models.spell_classifier import SpellClassifier
 
 
@@ -45,8 +46,8 @@ class TestSpellClassifier:
     def test_load_trained_model(self):
         model_path = Path(__file__).resolve().parent.parent / "models" / "alphabet" / "spell_classifier_best.pth"
         if not model_path.exists():
-            return  # Skip if model not trained yet
-        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+            pytest.skip("model checkpoint not present")
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
         state_dict = checkpoint.get("model_state_dict", checkpoint)
         model = SpellClassifier(num_classes=31, architecture="mlp")
         model.load_state_dict(state_dict)

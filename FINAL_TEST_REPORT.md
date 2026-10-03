@@ -41,7 +41,7 @@
 | Val-Test overlap | 0 exact duplicates |
 | Total unique samples | 7665 (matches sum of splits) |
 
-**No data leakage detected.**
+**Exact-duplicate check only:** the check above detects EXACT duplicates only — noisy near-duplicates were not checked. Note also that the W7CH augmentation ran before the train/val split (leakage); `scripts/prepare_data.py` has since been fixed (split-before-augment), and the reported accuracies should be re-run before being cited.
 
 ## Bugs Found and Fixed
 
@@ -65,7 +65,7 @@
 
 | Test File | Tests | Status |
 |---|---|---|
-| test_all.py | 35 | ALL PASS |
+| test_all.py | 36 | ALL PASS |
 | test_alphabet.py | 7 | ALL PASS |
 | test_api.py | 22 | ALL PASS |
 | test_continuous_models.py | 12 | ALL PASS |
@@ -75,7 +75,7 @@
 | test_models.py | 6 | ALL PASS |
 | test_spell_assembler.py | 7 | ALL PASS |
 | test_temporal_preprocessing.py | 12 | ALL PASS |
-| test_v1_adapter.py | 5 | ALL PASS |
+| test_v1_adapter.py | 4 | ALL PASS |
 
 ### API Tests (23 tests)
 ```
@@ -144,15 +144,19 @@
 
 ### 4. LLM Correction
 ```
-1. Configure LLM API key in .env
+1. Configure LLM API key in .env (copy .env.example → .env first, then edit)
 2. Verify corrected text differs from raw
 ```
 
 ### 5. Mode Switching
 ```
-1. Show "ta3raf" sign → should enter spell mode
-2. Show letters → should assemble into word
-3. Show "labes" sign → should exit spell mode
+1. Click the UI "Toggle Mode" button (or POST /mode/toggle) → mode should switch to SPELL
+2. Show letters → they should assemble into a word
+3. Toggle again (or POST /mode/toggle) → mode should switch back to SIGN
+Note: sign-based entry ("ta3raf" sign) does NOT work yet — ta3raf is in
+UNSUPPORTED_SIGN_CLASSES (src/config/settings.py) and has no training data
+(53/57 classes have data), so the model cannot recognize it. It requires
+training data for ta3raf first.
 ```
 
 ## Commands

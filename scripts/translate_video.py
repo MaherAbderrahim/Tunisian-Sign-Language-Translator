@@ -91,7 +91,7 @@ class TSLVideoTranslator:
             model.eval()
             return model
 
-        checkpoint = torch.load(DEFAULT_MODEL_PATH, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(DEFAULT_MODEL_PATH, map_location=self.device, weights_only=True)
         model = create_model("landmark", NUM_CLASSES)
         model.load_state_dict(checkpoint["model_state_dict"])
         model.eval()
@@ -114,7 +114,7 @@ class TSLVideoTranslator:
             return None
 
         try:
-            checkpoint = torch.load(spell_path, map_location=self.device, weights_only=False)
+            checkpoint = torch.load(spell_path, map_location=self.device, weights_only=True)
             model = SpellClassifier(num_classes=ALPHABET_NUM_CLASSES)
             model.load_state_dict(checkpoint["model_state_dict"])
             model.eval()

@@ -18,7 +18,7 @@ class V1SequenceAdapter:
     def __init__(self, model_path: Optional[str | Path] = None):
         from src.models.classifier import TSLClassifier
         model_path = Path(model_path or DEFAULT_MODEL_PATH)
-        ckpt = torch.load(model_path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(model_path, map_location="cpu", weights_only=True)
         self.class_names: list[str] = ckpt["class_names"]
         self.num_classes = len(self.class_names)
         model = TSLClassifier(

@@ -142,14 +142,20 @@ class StreamingRecognizer:
 
         if empty:
             self._gap_count += 1
-            # If we had an active run, finalize it now too (a short gap is fine)
-            if self._current_run_sign is not None and self._current_run_count >= self.stable_frames:
+            # If we had an active run, finalize it now too (a short gap is fine),
+            # unless it was already emitted by the stability path.
+            if (
+                self._current_run_sign is not None
+                and self._current_run_count >= self.stable_frames
+                and self._current_run_sign != self._last_emitted_sign
+            ):
                 event["sign"] = self._current_run_sign
                 event["is_stable"] = True
                 self._last_emitted_sign = self._current_run_sign
             self._current_run_sign = None
             self._current_run_count = 0
-            if self._gap_count >= self.gap_frames:
+            # Fire the boundary exactly once, on the transition into the gap.
+            if self._gap_count == self.gap_frames:
                 event["sentence_boundary"] = True
             return event
 

@@ -29,3 +29,9 @@ httpx>=0.24.0
 
 # Offline translation backend (no API key, no network at inference time)
 argostranslate>=1.9.0
+
+# Testing (README instructs `pytest`)
+pytest>=8.0.0
+
+# .env loading (used by scripts/test_llm.py; loaded at app startup)
+python-dotenv>=1.0.0

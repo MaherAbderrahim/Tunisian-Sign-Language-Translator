@@ -105,7 +105,7 @@ if legacy_path.exists():
     y_test = torch.from_numpy(inp["test"]["labels"])
 
     model = TSLClassifier()
-    state = torch.load(legacy_path, map_location="cpu", weights_only=False)
+    state = torch.load(legacy_path, map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "model_state_dict" in state:
         model.load_state_dict(state["model_state_dict"])
     elif isinstance(state, dict) and "state_dict" in state:

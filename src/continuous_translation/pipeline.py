@@ -39,7 +39,7 @@ class ContinuousSignPipeline:
 
     @classmethod
     def from_checkpoint(cls, checkpoint_path: str | Path, model_type: str = "bilstm") -> "ContinuousSignPipeline":
-        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
         num_classes = ckpt["num_classes"]
         model_cls = MODEL_REGISTRY[model_type]
         model = model_cls(

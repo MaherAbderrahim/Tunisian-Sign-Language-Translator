@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import random
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,15 @@ from src.config.settings import (
 from src.models.continuous.bilstm import BiLSTMAttentionModel
 from src.models.continuous.gru import GRUAttentionModel
 from src.preprocessing.temporal import pad_sequence_2d, collate_padded
+
+
+def _set_seed(seed: int = 42) -> None:
+    """Seed python/numpy/torch RNGs so runs are reproducible."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class SyntheticSignDataset(Dataset):
@@ -116,6 +126,7 @@ def compute_f1_macro(preds, labels, num_classes):
 
 
 def main():
+    _set_seed(42)
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", choices=["bilstm", "gru"], default="bilstm")
     parser.add_argument("--epochs", type=int, default=CONTINUOUS_NUM_EPOCHS)
