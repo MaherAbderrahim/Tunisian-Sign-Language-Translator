@@ -1,5 +1,5 @@
 """
-Train Spell Classifier (Version A) - Separate model for finger spelling.
+Train Spell Classifier - Separate model for finger spelling.
 
 Trains the SpellClassifier on TSL alphabet data (38 classes).
 
@@ -70,7 +70,7 @@ def train_model(args):
     """Train the spell classifier."""
     _set_seed(42)
     print("=" * 60)
-    print("Training Spell Classifier (Version A)")
+    print("Training Spell Classifier")
     print("=" * 60)
 
     # Load data

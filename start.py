@@ -27,14 +27,14 @@ def start_backend(host, port):
 
 
 def start_frontend(port):
-    """Start a simple HTTP server for the web frontend."""
+    """Start a no-cache HTTP server for the web frontend (web/serve.py)."""
     web_dir = PROJECT_ROOT / "web"
     if not web_dir.exists():
         print(f"✗ Web directory not found: {web_dir}")
         return None
 
     print(f"Starting web frontend on http://localhost:{port}...")
-    cmd = [sys.executable, "-m", "http.server", str(port)]
+    cmd = [sys.executable, "serve.py", str(port)]
     return subprocess.Popen(cmd, cwd=web_dir)
 
 

@@ -1,5 +1,5 @@
 """Generate 05_compare/comparison.ipynb: aggregates all metrics_*.json into
-comparison tables + plots, and evaluates the historical production model
+comparison tables + plots, and evaluates the production model
 (best_model.pth) on the clean test split as a reference.
 """
 from __future__ import annotations
@@ -20,10 +20,8 @@ d'expérience (`results/metrics_*.json`) et produit :
 - `results/results_summary.csv` — robustesse (baisse de précision moyenne) ;
 - les graphiques comparatifs dans `plots/comparisons/`.
 
-Il évalue aussi le **modèle de production actuel** (`models/best_model.pth`,
-entraîné avec l'ancien protocole augmenter-puis-split) sur le jeu de test
-propre, à titre de référence historique — non comparable directement
-aux nouvelles expériences (fuite de données possible dans l'ancien protocole).
+Il évalue aussi le **modèle livré avec l'application** (`models/best_model.pth`)
+sur le jeu de test propre, à côté des expériences de ce dossier.
 """),
     nbf.v4.new_code_cell("""\
 import sys
@@ -92,7 +90,7 @@ pd.set_option("display.max_columns", None)
 print(df.to_string(index=False))
 """),
     nbf.v4.new_markdown_cell("""\
-## 2. Évaluation du modèle de production actuel (référence historique)"""),
+## 2. Évaluation du modèle livré avec l'application"""),
     nbf.v4.new_code_cell("""\
 legacy_path = REPO_ROOT / "models" / "best_model.pth"
 if legacy_path.exists():

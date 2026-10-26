@@ -1,0 +1,56 @@
+@startuml
+skinparam defaultFontName Arial
+skinparam backgroundColor #FFFFFF
+skinparam sequence {
+  FontSize 12
+  ArrowColor #333333
+  ParticipantBackgroundColor #F4F7FB
+  ParticipantBorderColor #4472C4
+  LifeLineBorderColor #808080
+}
+
+actor "Personne sourde" as U
+participant "Interface web\n(navigateur)" as W
+participant "API FastAPI\n(WebSocket)" as A
+participant "Cœur de\ntraduction" as C
+participant "Classifieur\nMLP (57)" as M
+participant "Traduction locale\nArgos" as T
+participant "Correcteur LLM\n(optionnel)" as L
+
+U -> W : exécute un signe face à la caméra
+W -> A : ouverture du flux /ws/camera
+A --> W : session dédiée (historique isolé)
+
+loop toutes les 100 ms
+  W -> A : trame image (base64)
+  A -> C : trame décodée
+  C -> C : MediaPipe → vecteur 126-D
+  C -> M : inférence
+  M --> C : classe prédite + confiance
+  alt confiance < 0,30
+    C --> A : trame rejetée
+  else classe non supportée
+    C -> C : commutation signe ⇄ orthographe
+  else trame acceptée
+    C -> C : lissage majoritaire (fenêtre 5)
+    alt suite stable ≥ 4 trames
+      C -> C : émission du signe (une seule fois)
+      C -> C : ajout à la phrase courante
+    else trame vide depuis ≥ 6 trames
+      C -> C : frontière de phrase (une seule fois)
+    end
+  end
+end
+
+C -> T : phrase brute (mots tunisiens)
+T --> C : phrase en TN, FR, EN et AR
+
+opt correcteur LLM activé
+  C -> L : phrase à reformuler
+  L --> C : phrase corrigée **ou** texte brut
+end
+
+A --> W : phrase, confiance et historique
+W --> U : affichage multilingue
+
+@enduml

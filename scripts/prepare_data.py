@@ -10,7 +10,7 @@ This script:
     labels via TSLDictionary
   - Extracts MediaPipe landmarks per image
   - Splits the ORIGINALS 80/20 (train/val) and augments ONLY the train fold
-  - Saves features.npy / labels.npy / class_names.txt (legacy: raw originals)
+  - Saves features.npy / labels.npy / class_names.txt (unaugmented originals)
     plus X_train.npy / y_train.npy / X_val.npy / y_val.npy (augmented train,
     held-out val)
 
@@ -341,7 +341,7 @@ def main():
     print(f"Per-class range after balancing: min={min(counts.values())} max={max(counts.values())}")
 
     print("\nSaving processed data...")
-    # Legacy files keep their original meaning: the unaugmented originals.
+    # The unaugmented files keep their original meaning: the raw originals.
     save_processed_data(features, labels, class_names)
 
     # Explicit splits: train = augmented originals, val = held-out originals.

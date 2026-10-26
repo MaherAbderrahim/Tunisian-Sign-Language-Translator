@@ -86,7 +86,7 @@ def main():
                          ["scripts/prepare_alphabet_data.py", "--synthetic"]):
                 steps_ok += 1
 
-    # ── Step 4: Train sign classifier (V1) ──
+    # ── Step 4: Train sign classifier ──
     if not args.skip_train:
         if run_step("Train Sign Classifier (57 classes)",
                      ["-m", "src.models.train"]):
@@ -95,9 +95,9 @@ def main():
             steps_fail += 1
             print("  WARNING: Sign model training failed.")
 
-    # ── Step 5: Train spell classifier (Version A) ──
+    # ── Step 5: Train spell classifier ──
     if not args.skip_train:
-        if run_step("Train Spell Classifier (38 classes, Version A)",
+        if run_step("Train Spell Classifier (31 classes)",
                      ["scripts/train_spell.py"]):
             steps_ok += 1
         else:

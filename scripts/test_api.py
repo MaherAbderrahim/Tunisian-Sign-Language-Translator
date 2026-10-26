@@ -3,11 +3,19 @@ Test all REST API endpoints using FastAPI TestClient.
 No server needed — runs in-process.
 """
 import sys, os
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
+# This script POSTs a test LLM config: keep it away from the developer's real
+# data/llm_config.json (which may contain a live API key).
+os.environ.setdefault(
+    "TSL_LLM_CONFIG_PATH",
+    str(Path(tempfile.mkdtemp(prefix="tsl_api_test_")) / "llm_config.json"),
+)
 
 from fastapi.testclient import TestClient
 from api.main import app

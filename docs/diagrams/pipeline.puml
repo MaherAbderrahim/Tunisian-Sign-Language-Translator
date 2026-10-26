@@ -1,0 +1,82 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Arial
+skinparam backgroundColor #FFFFFF
+skinparam activity {
+  BackgroundColor #F4F7FB
+  BorderColor #4472C4
+  FontSize 12
+  DiamondBackgroundColor #FFF3D6
+  DiamondBorderColor #C89B1C
+}
+skinparam ArrowColor #333333
+skinparam ArrowFontSize 11
+
+start
+
+repeat
+  :Trame image reçue
+(caméra, image ou vidéo) ;
+  :Extraction MediaPipe Hand Landmarker
+(21 points × 2 mains → 126 valeurs) ;
+
+  if (Main détectée ?) then (non)
+    :Trame marquée vide ;
+    :Compteur de trous + 1 ;
+    if (Trou ≥ 6 trames ?) then (oui)
+      :Émettre une frontière de phrase
+(une seule fois) ;
+    else (non)
+    endif
+  else (oui)
+    :Normalisation centrée poignet
+et échelle de main ;
+    :Classifieur (57 signes ou 31 lettres) ;
+
+    if (Confiance ≥ 0,30 ?) then (non)
+      :Trame rejetée ;
+    else (oui)
+      if (Classe non supportée ?
+(ta3raf, karhba, metro, train)) then (oui)
+        :Contrôleur de mode :
+commutation signe ⇄ orthographe ;
+      else (non)
+        :Lissage majoritaire (fenêtre 5) ;
+        if (Suite stable ≥ 4 trames ?) then (oui)
+          :Émettre le signe (une seule fois) ;
+          if (Mode orthographe ?) then (oui)
+            :Assemblage lettre → mot ;
+            :trou ≥ 8 trames → mot figé ;
+          else (non)
+            :SentenceBuilder :
+ajout du signe à la phrase ;
+          endif
+        else (non)
+        endif
+      endif
+    endif
+  endif
+
+repeat while (trames disponibles ?) is (oui) not (non)
+
+:Traduction locale Argos
+(tunisien · français · anglais · arabe) ;
+
+if (Correcteur LLM activé ?) then (oui)
+  :Envoi de la phrase au modèle ;
+  if (Réponse plausible, pertinente
+et utilisable ?) then (oui)
+    :Phrase corrigée ;
+  else (non)
+    :Dégradation gracieuse :
+le texte brut est conservé ;
+  endif
+else (non)
+endif
+
+:Affichage multilingue
+et ajout à l'historique de session ;
+
+stop
+
+@enduml

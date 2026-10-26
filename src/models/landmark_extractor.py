@@ -79,14 +79,14 @@ class MediaPipeLandmarkExtractor:
     def extract_landmarks(
         self,
         frame: np.ndarray,
-        rgb: bool = True,
+        rgb: bool = False,
     ) -> Optional[np.ndarray]:
         """
         Extract hand landmarks from frame
 
         Args:
             frame: BGR or RGB image (H, W, 3)
-            rgb: If True, frame is already RGB
+            rgb: If True, frame is already RGB. Default False (expects BGR from OpenCV).
 
         Returns:
             Landmarks array of shape (num_hands, 21, 3) or None if no hands detected
@@ -127,7 +127,7 @@ class MediaPipeLandmarkExtractor:
         Returns:
             Feature vector of shape (126,) for 2 hands or (63,) for 1 hand
         """
-        landmarks = self.extract_landmarks(frame)
+        landmarks = self.extract_landmarks(frame, rgb=False)
 
         if landmarks is None:
             return None

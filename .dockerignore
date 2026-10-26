@@ -18,12 +18,22 @@ __pycache__/
 # Large / regenerable local data (bind-mounted at runtime instead)
 data/raw/
 data/alphabet/
+data/continuous/
 alternative_models/
 05_compare/
 manual_tests/
 notebooks/
 docs/
 test_images/
+
+# Local-only material (see .gitignore)
+tests/
+src/preprocessing/
+src/continuous_translation/
+src/models/continuous/
+src/models/multi_task_classifier.py
+Rapport_PFA_*/
+MODIFICATIONS.md
 
 # Local logs
 *.log
@@ -41,3 +51,6 @@ gh_login_*.txt
 .ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+
+# Runtime LLM configuration (may contain an API key)
+data/llm_config.json

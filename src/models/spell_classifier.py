@@ -1,5 +1,5 @@
 """
-Spell Classifier (Version A) - Separate model for finger spelling.
+Spell Classifier - Separate model for finger spelling.
 
 Supports two architectures:
   - "mlp": Simple MLP (from train_alphabet_models.py) — used by trained checkpoints

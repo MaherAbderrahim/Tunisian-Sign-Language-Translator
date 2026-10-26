@@ -22,7 +22,7 @@ SETUP_MD = """\
 **Protocole expérimental (commun à toutes les expériences) :**
 - Dataset : 7 664 images du dataset W7CH (TSL), landmarks MediaPipe (21 points × 2 mains).
 - Split stratifié 80/10/10 (seed 42) sur les échantillons ORIGINAUX, **avant**
-  toute augmentation → aucune fuite de données entre train et validation/test.
+  toute augmentation → jeux d'entraînement et de validation/test strictement disjoints.
 - Augmentation (rotation ±20°, échelle 0.85-1.15, translation ±0.1, bruit 0.02)
   appliquée **uniquement** sur le train, équilibré à 200 échantillons/classe.
 - Entraînement : Adam (lr 1e-3, wd 1e-4), CrossEntropy + label smoothing 0.1,
@@ -345,8 +345,8 @@ input 126 → 512 (+ skip 512) → 256 (+ skip 256) → 128 → 64 → 57.
 BatchNorm + ReLU + Dropout(0.2) à chaque bloc, label smoothing 0.1.""",
         max_epochs=120, name="baseline_mlp", forward_code=FLAT_FORWARD,
         conclusions="""Le MLP actuel sert de référence. On mesure ici sa performance réelle sur un protocole
-sans fuite de données (le protocole historique appliquait l'augmentation avant le split,
-ce qui pouvait faire apparaître des copies augmentées du même échantillon dans train ET test).
+d'évaluation strict : le split est appliqué avant toute augmentation, donc aucune copie
+augmentée d'un même échantillon n'apparaît à la fois dans train et dans test.
 Toute amélioration des architectures alternatives devra être mesurée relativement à cette baseline.""",
     )
 

@@ -42,10 +42,11 @@ from src.translation.mode_controller import ModeController
 from src.translation.translator_backend import OfflineTranslator
 
 try:
-    from src.translation.llm_corrector import LLMCorrector, LLMConfig
+    from src.translation.llm_corrector import LLMCorrector, LLMConfig, save_config
 except ImportError:
     LLMCorrector = None  # type: ignore
     LLMConfig = None  # type: ignore
+    save_config = None  # type: ignore
 
 # Configure logging only if the embedding application hasn't (avoids hijacking
 # the root logger when this module is imported as a library).
@@ -175,7 +176,7 @@ class TSLTranslator:
         self.class_names: List[str] = self.dictionary.get_all_labels()
         self.model = self._load_model(model_path)
 
-        # Load spell model (Version A: separate classifier for finger spelling)
+        # Load spell model (separate classifier for finger spelling)
         self.spell_model = self._load_spell_model()
 
         # LLM corrector (optional, configurable)
@@ -881,25 +882,150 @@ class TSLTranslator:
         )
         return raw_text
 
-    def configure_llm(self, provider: str, api_key: str, model: str = "", base_url: str = ""):
-        """Reconfigure the LLM corrector at runtime."""
+    async def coordinate_sentences(
+        self,
+        sentences: List[Dict],
+        target_lang: str = "en",
+    ) -> List[Dict]:
+        """LLM-coordinate each finalized video sentence (async, parallel).
+
+        Adds a "coordinated" key per sentence (natural sentence in
+        ``target_lang``) and refreshes that sentence's translations so every
+        language reflects the coordinated wording. When the LLM is disabled
+        or fails, sentences are returned untouched (frontend falls back to
+        the raw "sentence").
+        """
+        import asyncio
+        if not sentences:
+            return sentences
+        if not (self.llm_corrector and self.llm_corrector.enabled):
+            return sentences
+
+        async def _one(s: Dict) -> None:
+            raw = s.get("sentence") or " ".join(s.get("signs") or [])
+            if not raw:
+                return
+            s["coordinated"] = await self.llm_corrector.coordinate(
+                raw, target_lang=target_lang
+            )
+
+        await asyncio.gather(
+            *(_one(s) for s in sentences), return_exceptions=True
+        )
+        try:
+            await asyncio.to_thread(
+                self._refresh_sentence_translations, sentences, target_lang
+            )
+        except Exception as e:
+            logger.warning(f"Translation refresh after coordination failed: {e}")
+        return sentences
+
+    def _refresh_sentence_translations(
+        self, sentences: List[Dict], target_lang: str
+    ) -> None:
+        """Re-translate each coordinated sentence into the extra languages."""
+        for s in sentences:
+            coordinated = s.get("coordinated")
+            if not coordinated or coordinated == s.get("sentence"):
+                continue
+            translations = s.get("translations")
+            if not translations:
+                continue
+            for lang in list(translations.keys()):
+                try:
+                    translations[lang] = self.offline_translator.translate(
+                        coordinated, target_lang, lang
+                    )
+                except Exception:
+                    pass  # keep the original translation for this language
+
+    def configure_llm(
+        self,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[int] = None,
+    ):
+        """Reconfigure the LLM corrector at runtime and persist the choice.
+
+        Every argument is optional: ``None`` means "keep the current value",
+        so a partial update (e.g. only the model) can never reset the
+        provider, wipe the API key or drop temperature/max_tokens.
+
+        Switching provider resets the provider-specific fields (model,
+        base_url) unless they are supplied explicitly, so a stale
+        ``openrouter/free`` can never be sent to a local model.
+        """
         if LLMCorrector is None or LLMConfig is None:
             logger.warning("LLM corrector not available")
             return
-        # Convert string to enum if needed
         from src.translation.llm_corrector import LLMProvider
-        try:
-            provider_enum = LLMProvider(provider)
-        except ValueError as e:
-            raise ValueError(
-                f"Unknown LLM provider '{provider}'. Valid options: "
-                + ", ".join(p.value for p in LLMProvider)
-            ) from e
+
+        # Current effective config (falls back to the environment).
+        if self.llm_corrector is not None:
+            base = self.llm_corrector.config
+        else:
+            try:
+                base = LLMConfig.from_env()
+            except Exception:
+                base = LLMConfig()
+
+        if provider is None or not str(provider).strip():
+            provider_enum = base.provider
+        else:
+            try:
+                provider_enum = LLMProvider(str(provider).strip().lower())
+            except ValueError as e:
+                raise ValueError(
+                    f"Unknown LLM provider '{provider}'. Valid options: "
+                    + ", ".join(p.value for p in LLMProvider)
+                ) from e
+
+        provider_changed = provider_enum != base.provider
+        if model is None or (not str(model).strip() and provider_changed):
+            # No model supplied, or an empty model after a provider switch:
+            # let apply_defaults() pick the new provider's own default.
+            model = "" if provider_changed else base.model
+        else:
+            model = str(model).strip()
+            if provider_changed and provider_enum != LLMProvider.CUSTOM:
+                # A model that is another provider's built-in default is a
+                # leftover from the previous selection, not a user choice.
+                stale_defaults = {
+                    str(v.get("model") or "")
+                    for k, v in LLMConfig.PROVIDER_DEFAULTS.items()
+                    if k != provider_enum and v.get("model")
+                }
+                if model in stale_defaults:
+                    model = ""
+
+        if base_url is None or not str(base_url).strip():
+            # Empty/absent: keep the current endpoint, except right after a
+            # provider switch where the new provider's own default applies.
+            base_url = "" if provider_changed else base.base_url
+        else:
+            base_url = str(base_url).strip()
+
+        # API keys are provider-specific: when the provider changes and no new
+        # key is supplied, drop the old one instead of sending it elsewhere.
+        if api_key is not None:
+            new_key = str(api_key)
+        elif provider_changed:
+            new_key = ""
+        else:
+            new_key = base.api_key
+
         config = LLMConfig(
             provider=provider_enum,
-            api_key=api_key,
+            api_key=new_key,
             model=model,
             base_url=base_url,
+            temperature=base.temperature if temperature is None else float(temperature),
+            max_tokens=base.max_tokens if max_tokens is None else int(max_tokens),
+            timeout=base.timeout if timeout is None else int(timeout),
         )
         config.apply_defaults()
         config.validate()  # raises ValueError on unsafe/invalid base_url
@@ -907,7 +1033,10 @@ class TSLTranslator:
             self.llm_corrector = LLMCorrector(config)
         else:
             self.llm_corrector.configure(config)
-        logger.info(f"LLM reconfigured: {provider}/{config.model}")
+        if save_config is not None:
+            save_config(config)  # survives an API restart
+        logger.info(f"LLM reconfigured: {config.provider.value}/{config.model}")
+
 
     def get_llm_config(self) -> dict:
         """Get current LLM configuration."""

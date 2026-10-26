@@ -1,0 +1,71 @@
+@startuml
+!pragma layout smetana
+skinparam defaultFontName Arial
+skinparam backgroundColor #FFFFFF
+skinparam activity {
+  BackgroundColor #F4F7FB
+  BorderColor #4472C4
+  FontSize 12
+  DiamondBackgroundColor #FFF3D6
+  DiamondBorderColor #C89B1C
+}
+skinparam ArrowColor #333333
+skinparam ArrowFontSize 11
+
+start
+
+:Jeu W7CH — 4 423 images 224 × 224
+57 classes, 7 performeurs, licence CC0 ;
+
+:Parcours des dossiers
+catégorie / signe ;
+
+partition "Parcours des fichiers (limite identifiée)" {
+  :Recherche « *.jpg » et « *.JPG » ;
+  note right
+    Sous Windows, le parcours est insensible
+    à la casse : chaque image est retournée
+    **deux fois** avant tout découpage.
+  end note
+}
+
+:Extraction MediaPipe Hand Landmarker
+21 points × 2 mains × (x, y, z) ;
+
+:Normalisation centrée poignet
+et échelle de main → vecteur 126-D ;
+
+:features.npy / labels.npy
+7 664 lignes pour 3 816 vecteurs uniques ;
+
+partition "Découpage" {
+  :Découpage 80 / 10 / 10 (graine 42)
+**avant** toute augmentation ;
+  note right
+    Les jumeaux d'une même image peuvent
+    se retrouver des deux côtés :
+    **1 225 / 1 533** échantillons de
+    validation sont identiques à un
+    échantillon d'entraînement.
+  end note
+}
+
+:Augmentation du seul jeu d'entraînement
+rotation ±20°, échelle 0,85–1,15,
+translation ±0,1, bruit 0,02
+rééquilibrage à 200 échantillons/classe ;
+
+:X_train = 13 282
+X_val = 767  ·  X_test = 767 ;
+
+stop
+
+legend right
+  Jeu distinct — alphabet (finger spelling)
+  ==========================================
+  ArSL : 7 665 échantillons de landmarks,
+  31 classes, découpage 6 263 / 701 / 701,
+  **0 doublon** entre les trois jeux.
+endlegend
+
+@enduml

@@ -1,19 +1,18 @@
 """
 FastAPI endpoints for TSL Translator.
 
-Security / correctness fixes vs the original:
-  - CORS: allow_origins is configurable via env (TSL_CORS_ORIGINS) and
-    defaults to an explicit list; `allow_credentials` only set if origins are
-    not "*".
-  - POST /llm/config: optional admin token (TSL_ADMIN_TOKEN) + strict
-    base_url validation performed by LLMConfig.validate() (SSRF guard).
-  - Per-client sessions (X-Session-Id header; one session per WebSocket) so
+Highlights:
+  - CORS origins configurable via env (`TSL_CORS_ORIGINS`), explicit allow-list
+    by default; credentials only enabled when origins are not "*".
+  - `POST /llm/config` optionally gated by an admin token (`TSL_ADMIN_TOKEN`)
+    with strict `base_url` validation (SSRF guard).
+  - Per-client sessions (`X-Session-Id` header, one session per WebSocket) so
     concurrent clients never share history, mode or smoothing state.
   - Upload size limits enforced while streaming (never buffer past the cap).
-  - Inference is run in a threadpool to avoid blocking the event loop; heavy
+  - Inference runs in a threadpool to avoid blocking the event loop; heavy
     offline-translation endpoints are plain `def` so Starlette runs them in
     its threadpool.
-  - History is bounded per session (HISTORY_MAX_LEN).
+  - History is bounded per session (`HISTORY_MAX_LEN`).
   - Simple in-memory rate limiting on the LLM endpoints.
 """
 
@@ -32,7 +31,7 @@ try:  # optional dependency; .env loading is a convenience only
 except ImportError:
     pass
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -70,7 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TSL Translator API",
     description="Tunisian Sign Language (W7CH dataset) to Dialect Translation API",
-    version="3.0.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
 
@@ -151,6 +150,29 @@ def _require_translator() -> TSLTranslator:
     if translator is None:
         raise HTTPException(status_code=503, detail="Translator not initialized")
     return translator
+
+
+# Languages the sentence assembler + LLM coordinator actually support.
+# Anything else would silently fall back to English — better to refuse it.
+TARGET_LANG_ALIASES = {
+    "en": "en", "english": "en",
+    "fr": "fr", "french": "fr",
+    "ar": "ar", "arabic": "ar", "arabic_msa": "ar", "msa": "ar",
+    "tunisian": "tunisian", "tn": "tunisian", "derja": "tunisian",
+}
+
+
+def _normalize_target_lang(lang: str) -> str:
+    key = (lang or "").strip().lower()
+    if key not in TARGET_LANG_ALIASES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported target_lang '{lang}'. Supported: "
+                + ", ".join(sorted(set(TARGET_LANG_ALIASES.values())))
+            ),
+        )
+    return TARGET_LANG_ALIASES[key]
 
 
 # ── Models ──────────────────────────────────────────────────────────────
@@ -333,15 +355,20 @@ async def translate_video(
     file: UploadFile = File(...),
     target_lang: str = "en",
     extra_langs: str = "en,fr,ar",
+    sample_rate: int = Query(4, ge=1, le=16, description="Process 1 frame every N"),
+    llm: str = Query("1", description="Coordinate sentences with the LLM (1/0)"),
 ):
     """Process an uploaded video file and return assembled sentences with
     multi-language translations of each sentence.
 
     Uses StreamingRecognizer + SentenceBuilder under the hood for continuous
     recognition + phrase detection. Video processing uses a private session,
-    so it never touches other clients' state.
+    so it never touches other clients' state. When the LLM is enabled, each
+    sentence is additionally coordinated (natural wording in target_lang)
+    and its translations refreshed from the coordinated text.
     """
     tr = _require_translator()
+    target_lang = _normalize_target_lang(target_lang)
 
     contents = await _read_capped(file, VIDEO_MAX_BYTES)
 
@@ -358,13 +385,19 @@ async def translate_video(
             tmp_path,
             target_lang=target_lang,
             extra_langs=extra,
-            sample_every_n_frames=3,
+            sample_every_n_frames=sample_rate,
         )
+        use_llm = llm.strip().lower() in ("1", "true", "yes", "on")
+        if sentences and use_llm:
+            sentences = await tr.coordinate_sentences(
+                sentences, target_lang=target_lang
+            )
         return {
             "sentences": sentences,
             "count": len(sentences),
             "target_lang": target_lang,
             "extra_langs": extra,
+            "llm": use_llm,
         }
     finally:
         try:
@@ -478,10 +511,17 @@ async def set_inference_settings(request: InferenceSettingsRequest):
 # ── LLM Configuration ───────────────────────────────────────────────────
 
 class LLMConfigRequest(BaseModel):
-    provider: str = "openrouter"
-    api_key: str = ""
-    model: str = ""
-    base_url: str = ""
+    """Partial update: every field is optional.
+
+    ``None`` (field omitted) means "keep the current value" — this is what
+    stops a partial payload from resetting the provider to the OpenRouter
+    default or wiping a stored API key. ``api_key`` sent as an empty string
+    explicitly clears the key.
+    """
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 @app.get("/llm/config")
@@ -504,7 +544,7 @@ async def set_llm_config(request: Request, body: LLMConfigRequest):
     _require_admin(request)
     _rate_limit(request, "llm_config", limit=10)
 
-    if len(body.api_key) > 512 or len(body.base_url) > 512 or len(body.model) > 256:
+    if len(body.api_key or "") > 512 or len(body.base_url or "") > 512 or len(body.model or "") > 256:
         raise HTTPException(status_code=413, detail="Configuration field too long")
 
     try:

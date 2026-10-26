@@ -1,0 +1,62 @@
+@startuml
+skinparam defaultFontName Arial
+skinparam backgroundColor #FFFFFF
+skinparam usecase {
+  BackgroundColor #F4F7FB
+  BorderColor #4472C4
+  FontSize 12
+}
+skinparam actor {
+  BackgroundColor #FFFFFF
+  BorderColor #333333
+  FontSize 12
+}
+left to right direction
+
+actor "Personne sourde\n(utilisateur final)" as U
+actor "Développeur\nou intégrateur" as D
+
+rectangle "Système — Tunisian Sign Language Translator" {
+  usecase "Traduire une image\ncontenant un signe" as UC1
+  usecase "Traduire un flux caméra\nen temps réel" as UC2
+  usecase "Traduire une vidéo,\nphrase par phrase" as UC3
+  usecase "Orthographier un mot\nlettre par lettre" as UC4
+  usecase "Basculer entre mode signe\net mode orthographe" as UC5
+  usecase "Consulter le dictionnaire\n57 signes × 4 langues" as UC6
+  usecase "Traduire un texte saisi\n(hors ligne)" as UC7
+  usecase "Faire corriger la phrase\npar un LLM (optionnel)" as UC8
+  usecase "Régler le seuil de confiance\net la fenêtre de lissage" as UC9
+  usecase "Consulter l'historique\ndes traductions" as UC10
+  usecase "Consulter et appeler\nla documentation de l'API" as UC11
+}
+
+U --> UC1
+U --> UC2
+U --> UC3
+U --> UC4
+U --> UC5
+U --> UC6
+U --> UC7
+U --> UC9
+U --> UC10
+
+D --> UC7
+D --> UC8
+D --> UC11
+
+UC2 ..> UC5 : <<include>>
+UC3 ..> UC8 : <<extend>>
+UC1 ..> UC8 : <<extend>>
+
+note right of UC8
+  Correcteur facultatif : s'il échoue,
+  la phrase brute est affichée (dégradation).
+end note
+
+note bottom of UC4
+  Les quatre signes sans main détectable
+  (ta3raf, karhba, metro, train) déclenchent
+  la commutation de mode.
+end note
+
+@enduml

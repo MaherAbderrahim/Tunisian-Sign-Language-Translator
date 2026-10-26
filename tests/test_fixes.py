@@ -1,9 +1,8 @@
-"""Regression tests for the audit fixes.
+"""Regression tests for security, session isolation and streaming behaviour.
 
-Covers: per-client sessions (H1), mode-control signs blocked by the
-UNSUPPORTED filter (H2), SSRF guard on the LLM config (C1), streaming
-gap dedup / single sentence boundary (L6), API session isolation and
-inference settings endpoints.
+Covers: per-client sessions, mode-control signs blocked by the UNSUPPORTED
+filter, SSRF guard on the LLM config, streaming gap dedup / single sentence
+boundary, API session isolation and inference settings endpoints.
 """
 
 import sys
@@ -29,7 +28,7 @@ def client():
 
 
 class TestSessionIsolation:
-    """H1: concurrent clients must not share history / mode / smoothing."""
+    """Concurrent clients must not share history / mode / smoothing."""
 
     def test_mode_isolated_per_session(self, translator):
         translator.clear_history("sessA")
@@ -85,7 +84,7 @@ class TestSessionIsolation:
 
 
 class TestModeControlSigns:
-    """H2: control signs blocked by UNSUPPORTED_SIGN_CLASSES must still
+    """Control signs blocked by UNSUPPORTED_SIGN_CLASSES must still
     reach the mode controller (via the raw mode_label)."""
 
     def test_ta3raf_is_unsupported_but_consumed_by_mode_controller(self):
@@ -110,7 +109,7 @@ class TestModeControlSigns:
 
 
 class TestStreamingGapFixes:
-    """L6: no duplicate emission on gap finalize; boundary fires once."""
+    """No duplicate emission on gap finalize; boundary fires once."""
 
     def test_no_duplicate_emit_on_gap_finalize(self):
         from src.translation.streaming import StreamingRecognizer
@@ -148,7 +147,7 @@ class TestStreamingGapFixes:
 
 
 class TestLLMConfigSecurity:
-    """C1: SSRF guard on LLMConfig.validate()."""
+    """SSRF guard on LLMConfig.validate()."""
 
     @staticmethod
     def _cfg(**kw):
@@ -317,6 +316,91 @@ class TestAPISessionsAndSettings:
             "model": "m",
         })
         assert r.status_code == 400
+
+
+class TestVideoLLMCoordination:
+    """Video endpoint: sample_rate validation + LLM coordination wiring."""
+
+    @staticmethod
+    def _tiny_video(tmp_path):
+        """45-frame video built from labes.jpg (a hand sign → 1+ sentences)."""
+        import cv2
+        img_path = Path(__file__).resolve().parent.parent / "test_images" / "labes.jpg"
+        img = cv2.imread(str(img_path))
+        assert img is not None, f"missing fixture {img_path}"
+        h, w = img.shape[:2]
+        vw, vh = min(w, 320), int(min(h, 320) * h / w)
+        if vh % 2:
+            vh += 1
+        path = str(tmp_path / "tiny.mp4")
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 15, (vw, vh))
+        for _ in range(45):
+            out.write(cv2.resize(img, (vw, vh)))
+        out.release()
+        return path
+
+    @staticmethod
+    def _upload(client, path, query):
+        with open(path, "rb") as f:
+            return client.post(
+                f"/translate/video?{query}",
+                files={"file": ("tiny.mp4", f, "video/mp4")},
+            )
+
+    def test_sample_rate_validation(self, client, tmp_path):
+        video = self._tiny_video(tmp_path)
+        r = self._upload(client, video, "sample_rate=0&llm=0")
+        assert r.status_code == 422
+
+    def test_video_without_llm_has_no_coordinated(self, client, tmp_path):
+        video = self._tiny_video(tmp_path)
+        r = self._upload(client, video, "llm=0")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["llm"] is False
+        assert data["count"] >= 1, "labes video must yield at least one sentence"
+        for s in data["sentences"]:
+            assert "coordinated" not in s
+            assert s["signs"] and s["sentence"]
+
+    def test_video_with_llm_adds_coordinated(self, client, tmp_path, monkeypatch):
+        from api.main import translator as tr
+        from src.translation.llm_corrector import LLMCorrector
+
+        async def fake_coordinate(self, raw_text, target_lang="en"):
+            return f"COORD({raw_text})"
+
+        monkeypatch.setattr(LLMCorrector, "coordinate", fake_coordinate)
+        # Deterministic regardless of whether .env has an LLM key:
+        monkeypatch.setattr(tr.llm_corrector, "_enabled", True, raising=False)
+
+        video = self._tiny_video(tmp_path)
+        r = self._upload(client, video, "llm=1")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["llm"] is True
+        assert data["count"] >= 1
+        for s in data["sentences"]:
+            assert s["coordinated"].startswith("COORD(")
+            assert s["coordinated"] != s["sentence"]
+            # translations refreshed but still present for every extra lang
+            assert set(s["translations"].keys()) == {"en", "fr", "ar"}
+
+    def test_video_llm_failure_falls_back_to_raw(self, client, tmp_path, monkeypatch):
+        """LLM exploding must never break the video response."""
+        from api.main import translator as tr
+        from src.translation.llm_corrector import LLMCorrector
+
+        async def boom(self, raw_text, target_lang="en"):
+            raise RuntimeError("llm down")
+
+        monkeypatch.setattr(LLMCorrector, "coordinate", boom)
+        monkeypatch.setattr(tr.llm_corrector, "_enabled", True, raising=False)
+
+        video = self._tiny_video(tmp_path)
+        r = self._upload(client, video, "llm=1")
+        assert r.status_code == 200
+        assert r.json()["count"] >= 1
 
 
 if __name__ == "__main__":

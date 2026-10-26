@@ -1,7 +1,6 @@
 // ── TSL Translator Frontend ──
 
-// API is always on port 8000; frontend may be served from a different port
-const API_BASE = 'http://localhost:8000';
+const API_BASE = `${window.location.protocol}//${window.location.hostname || 'localhost'}:8000`;
 
 const WS_URL = API_BASE.replace('http', 'ws') + '/ws/camera';
 
@@ -11,6 +10,7 @@ let stream = null;
 let cameraActive = false;
 let sendInterval = null;
 let currentMode = 'sign';
+let selectedFile = null; // set by file picker OR drag & drop
 let lastCorrectedText = '';
 let lastCorrectAt = 0;
 const CORRECT_MIN_INTERVAL_MS = 3000; // throttle LLM calls (cost + latency)
@@ -243,70 +243,293 @@ $('#file-input').addEventListener('change', (e) => {
     if (e.target.files[0]) handleFile(e.target.files[0]);
 });
 
+function isVideoFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.startsWith('video/')) return true;
+    const ext = (file.name || '').split('.').pop().toLowerCase();
+    return ['mp4', 'avi', 'mov', 'mkv', 'webm', 'wmv', 'flv', 'm4v'].includes(ext);
+}
+
+function isImageFile(file) {
+    if (!file) return false;
+    if (file.type && file.type.startsWith('image/')) return true;
+    const ext = (file.name || '').split('.').pop().toLowerCase();
+    return ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'gif', 'svg'].includes(ext);
+}
+
 function handleFile(file) {
     const preview = $('#upload-preview');
     const img = $('#preview-image');
     const vid = $('#preview-video');
+    const resultBox = $('#upload-result');
 
-    if (file.type.startsWith('image/')) {
+    selectedFile = file;
+
+    // Clear previous results and progress
+    if (resultBox) {
+        resultBox.hidden = true;
+        resultBox.style.display = 'none';
+        resultBox.innerHTML = '';
+    }
+    const progress = $('#upload-progress');
+    if (progress) {
+        progress.hidden = true;
+        progress.style.display = 'none';
+    }
+
+    const isVid = isVideoFile(file);
+    const isImg = isImageFile(file);
+
+    if (isImg) {
         img.src = URL.createObjectURL(file);
         img.hidden = false;
+        img.style.display = 'block';
         vid.hidden = true;
-    } else if (file.type.startsWith('video/')) {
+        vid.style.display = 'none';
+        try { vid.pause(); } catch (_) {}
+    } else if (isVid) {
         vid.src = URL.createObjectURL(file);
         vid.hidden = false;
+        vid.style.display = 'block';
         img.hidden = true;
+        img.style.display = 'none';
+    } else {
+        // Fallback: try image preview
+        img.src = URL.createObjectURL(file);
+        img.hidden = false;
+        img.style.display = 'block';
+        vid.hidden = true;
+        vid.style.display = 'none';
     }
+
     preview.hidden = false;
+    preview.style.display = 'block';
     preview.dataset.file = file.name;
     preview.dataset.type = file.type;
+
+    const btn = $('#btn-translate-upload');
+    if (btn) btn.disabled = false;
 }
 
 $('#btn-translate-upload').addEventListener('click', async () => {
-    const preview = $('#upload-preview');
     const fileInput = $('#file-input');
-    if (!fileInput.files[0]) return;
+    const file = selectedFile || (fileInput.files && fileInput.files[0]);
+    if (!file) {
+        $('#output-raw').textContent = 'Aucun fichier — glisse-dépose une image/vidéo ou clique sur « Select File »';
+        $('#output-corrected').textContent = '—';
+        $('#output-confidence').textContent = '—';
+        return;
+    }
 
     const progress = $('#upload-progress');
-    progress.hidden = false;
+    const label = $('#upload-progress span');
+    const btn = $('#btn-translate-upload');
+    const resultBox = $('#upload-result');
+    if (resultBox) {
+        resultBox.hidden = true;
+        resultBox.style.display = 'none';
+    }
 
-    const formData = new FormData();
-    formData.append('file', fileInput.files[0]);
+    progress.hidden = false;
+    progress.style.display = 'flex';
+    btn.disabled = true;
+
+    // Elapsed counter: long videos keep visible feedback (never look frozen)
+    const startedAt = Date.now();
+    const tick = setInterval(() => {
+        const s = Math.round((Date.now() - startedAt) / 1000);
+        label.textContent = s > 0 ? `Processing... ${s}s` : 'Processing...';
+    }, 250);
 
     try {
-        let result;
-        if (fileInput.files[0].type.startsWith('video/')) {
-            const resp = await fetch(`${API_BASE}/translate/video`, {
-                method: 'POST',
-                body: formData,
-            });
-            result = await resp.json();
-        } else {
-            const resp = await fetch(`${API_BASE}/translate/frame`, {
-                method: 'POST',
-                body: formData,
-            });
-            result = await resp.json();
+        const isVideo = isVideoFile(file);
+        const sampleRate = ($('#sample-rate') && $('#sample-rate').value) || '4';
+        const targetLang = ($('#target-lang') && $('#target-lang').value) || 'en';
+        const url = `${API_BASE}${isVideo
+            ? `/translate/video?sample_rate=${encodeURIComponent(sampleRate)}&llm=1&target_lang=${encodeURIComponent(targetLang)}`
+            : '/translate/frame'}`;
+        const formData = new FormData();
+        formData.append('file', file);
+
+        const resp = await fetch(url, { method: 'POST', body: formData });
+        let result = {};
+        try { result = await resp.json(); } catch (_) { /* non-JSON body */ }
+
+        if (!resp.ok) {
+            let errorMsg = result.detail || `HTTP ${resp.status}`;
+            if (resp.status === 422 && String(result.detail).includes('No hands detected')) {
+                errorMsg = 'Aucune main détectée. Assurez-vous que les mains et les gestes sont bien visibles.';
+            } else if (resp.status === 413) {
+                errorMsg = 'Fichier trop volumineux (max 50 Mo pour vidéo, 10 Mo pour image).';
+            }
+            $('#output-raw').textContent = 'Erreur : ' + errorMsg;
+            $('#output-corrected').textContent = '—';
+            $('#output-confidence').textContent = '—';
+            if (resultBox) {
+                resultBox.hidden = false;
+                resultBox.style.display = 'block';
+                resultBox.innerHTML = `<div class="alert-error">⚠️ ${errorMsg}</div>`;
+            }
+            return;
         }
 
         if (result.sentences) {
-            const texts = result.sentences.map(s => s.sentence).join(' ');
-            $('#output-raw').textContent = texts || '—';
+            // Video result
+            if (result.sentences.length > 0) {
+                const rawTexts = result.sentences.map(s => s.sentence).filter(Boolean).join(' ');
+                const coordTexts = result.sentences.map(s => s.coordinated).filter(Boolean).join(' ');
+                const langLabel = LANG_LABELS[result.target_lang] || result.target_lang || 'English';
+                $('#output-raw').textContent = rawTexts || '—';
+                $('#output-corrected').textContent = coordTexts || '—';
+                $('#output-confidence').textContent = '1.00';
+                if (resultBox) {
+                    resultBox.hidden = false;
+                    resultBox.style.display = 'block';
+                    let html = `<div class="upload-result-card">
+                        <h3>Phrases reconnues (${result.sentences.length})</h3>`;
+                    result.sentences.forEach((s, idx) => {
+                        const signsStr = (s.signs || []).join(', ') || '—';
+                        const fr = s.translations && s.translations.fr ? s.translations.fr : '';
+                        const ar = s.translations && s.translations.ar ? s.translations.ar : '';
+                        const coordRow = s.coordinated
+                            ? `<div class="result-row"><span class="badge badge-llm">LLM</span> <strong>${s.coordinated}</strong></div>`
+                            : `<div class="result-row"><span class="badge badge-en">${langLabel}</span> ${s.sentence}</div>`;
+                        html += `
+                            <div class="sentence-item">
+                                <div class="sentence-num">#${idx + 1}</div>
+                                <div class="sentence-details">
+                                    <div class="result-row"><span class="badge">Signes</span> <strong>${signsStr}</strong></div>
+                                    ${coordRow}
+                                    ${fr ? `<div class="result-row"><span class="badge badge-fr">Français</span> ${fr}</div>` : ''}
+                                    ${ar ? `<div class="result-row"><span class="badge badge-ar">العربية</span> <span dir="rtl">${ar}</span></div>` : ''}
+                                </div>
+                            </div>
+                        `;
+                    });
+                    html += `</div>`;
+                    resultBox.innerHTML = html;
+                }
+                addToHistory(coordTexts || rawTexts);
+            } else {
+                $('#output-raw').textContent = 'Aucun signe détecté dans la vidéo';
+                $('#output-corrected').textContent = '—';
+                $('#output-confidence').textContent = '—';
+                if (resultBox) {
+                    resultBox.hidden = false;
+                    resultBox.style.display = 'block';
+                    resultBox.innerHTML = `<div class="alert-warning">⚠️ Aucun geste de langue des signes n'a pu être identifié dans la vidéo. Essayez de faire des signes plus nets et visibles face à la caméra.</div>`;
+                }
+            }
         } else {
-            const raw = result.tsl || result.tunisian || result.french || result.english || '';
+            // Single image frame result
+            const raw = result.tsl || result.tunisian || result.french || result.english || result.arabic || '';
+            const conf = (result.confidence || 0).toFixed(2);
             $('#output-raw').textContent = raw || '—';
-            $('#output-confidence').textContent = (result.confidence || 0).toFixed(2);
+            $('#output-corrected').textContent = '—';
+            $('#output-confidence').textContent = conf;
+
+            if (result.rejected || !raw) {
+                if (resultBox) {
+                    resultBox.hidden = false;
+                    resultBox.style.display = 'block';
+                    resultBox.innerHTML = `<div class="alert-warning">⚠️ Geste non reconnu avec une confiance suffisante (${conf}). Essayez avec un angle plus net.</div>`;
+                }
+            } else {
+                if (resultBox) {
+                    resultBox.hidden = false;
+                    resultBox.style.display = 'block';
+                    resultBox.innerHTML = `
+                        <div class="upload-result-card">
+                            <h3>Résultat de la traduction</h3>
+                            <div class="result-grid">
+                                <div class="result-item"><span class="label">Signe TSL</span><span class="val highlight">${result.tsl || '—'}</span></div>
+                                <div class="result-item"><span class="label">Dialecte tunisien</span><span class="val">${result.tunisian || '—'}</span></div>
+                                <div class="result-item"><span class="label">Français</span><span class="val">${result.french || '—'}</span></div>
+                                <div class="result-item"><span class="label">Anglais</span><span class="val">${result.english || '—'}</span></div>
+                                <div class="result-item"><span class="label">Arabe</span><span class="val" dir="rtl">${result.arabic || result.arabic_msa || '—'}</span></div>
+                                <div class="result-item"><span class="label">Confiance</span><span class="val badge-conf">${Math.round((result.confidence || 0) * 100)}%</span></div>
+                            </div>
+                        </div>
+                    `;
+                }
+                addToHistory(raw, conf);
+            }
         }
     } catch (err) {
-        alert('Translation failed: ' + err.message);
+        const netErr = err instanceof TypeError || /fetch|network/i.test(err.message || '');
+        const msg = netErr
+            ? 'Serveur API injoignable (localhost:8000) — vérifie que « python start.py » tourne, puis réessaie.'
+            : 'Échec de la traduction : ' + err.message;
+        $('#output-raw').textContent = msg;
+        $('#output-corrected').textContent = '—';
+        $('#output-confidence').textContent = '—';
+        if (resultBox) {
+            resultBox.hidden = false;
+            resultBox.style.display = 'block';
+            resultBox.innerHTML = `<div class="alert-error">⚠ ${msg}</div>`;
+        }
     } finally {
+        clearInterval(tick);
+        label.textContent = 'Processing...';
+        btn.disabled = false;
         progress.hidden = true;
+        progress.style.display = 'none';
     }
 });
 
 // ── Settings ──
+// Built-in defaults per provider (mirrors LLMConfig.PROVIDER_DEFAULTS).
+// A model that matches another provider's default is a leftover from the
+// previous selection and must not be sent to the newly selected provider.
+const LLM_PROVIDER_DEFAULTS = {
+    openrouter: 'openrouter/free',
+    openai: 'gpt-4o-mini',
+    anthropic: 'claude-3-haiku-20240307',
+    ollama: 'llama3.2:3b',
+    custom: '',
+};
+
+const LANG_LABELS = { en: 'English', fr: 'Français', ar: 'العربية', tunisian: 'Tunisien' };
+
+function setLlmStatus(text, isError = false) {
+    const el = $('#llm-status');
+    el.textContent = text;
+    el.classList.toggle('error', !!isError);
+}
+
+function renderActiveLlm(config) {
+    const el = $('#llm-active');
+    if (!el || !config || !config.provider) return;
+    const local = config.is_local ? ' · local' : '';
+    const state = config.enabled
+        ? 'actif'
+        : 'désactivé (clé API manquante)';
+    el.innerHTML = `Actif : <b>${config.provider} / ${config.model}</b> `
+        + `(${state}${local})`;
+}
+
+function syncModelPlaceholder(provider) {
+    $('#llm-model').placeholder = LLM_PROVIDER_DEFAULTS[provider]
+        || 'nom-du-modèle';
+}
+
 $('#llm-provider').addEventListener('change', (e) => {
-    $('#custom-url-group').hidden = e.target.value !== 'custom';
+    const provider = e.target.value;
+    $('#custom-url-group').hidden = provider !== 'custom';
+    syncModelPlaceholder(provider);
+    // Drop a default inherited from the previously selected provider so it
+    // can never be sent to the new one (the server re-applies its default).
+    const modelInput = $('#llm-model');
+    const defaults = Object.values(LLM_PROVIDER_DEFAULTS).filter(Boolean);
+    if (defaults.includes(modelInput.value.trim())) {
+        modelInput.value = '';
+    }
+    // The masked key belongs to the previous provider (keys are per provider)
+    const keyInput = $('#llm-api-key');
+    if (keyInput.value === '••••••••') keyInput.value = '';
+    keyInput.placeholder = provider === 'ollama'
+        ? 'non requis (modèle local)'
+        : 'sk-...';
 });
 
 $('#confidence-threshold').addEventListener('input', (e) => {
@@ -314,11 +537,14 @@ $('#confidence-threshold').addEventListener('input', (e) => {
 });
 
 $('#btn-save-llm').addEventListener('click', async () => {
+    const keyField = $('#llm-api-key').value;
+    const masked = keyField === '••••••••';
     const config = {
         provider: $('#llm-provider').value,
-        api_key: $('#llm-api-key').value === '••••••••' ? '' : $('#llm-api-key').value,
-        model: $('#llm-model').value,
-        base_url: $('#llm-base-url').value,
+        // null = "keep the stored key"; only a freshly typed value replaces it.
+        api_key: masked ? null : keyField,
+        model: $('#llm-model').value.trim(),
+        base_url: $('#llm-base-url').value.trim(),
     };
     try {
         const resp = await fetch(`${API_BASE}/llm/config`, {
@@ -328,13 +554,25 @@ $('#btn-save-llm').addEventListener('click', async () => {
         });
         const result = await resp.json();
         if (!resp.ok) {
-            $('#llm-status').textContent = 'Error: ' + (result.detail || resp.status);
-        } else {
-            $('#llm-status').textContent = 'Saved!';
-            setTimeout(() => { $('#llm-status').textContent = ''; }, 2000);
+            setLlmStatus('Error: ' + (result.detail || resp.status), true);
+            return;
         }
+        setLlmStatus('Saved!');
+        // Reflect exactly what the server stored — no optimistic UI.
+        if (result.config) {
+            renderActiveLlm(result.config);
+            $('#llm-provider').value = result.config.provider;
+            $('#llm-model').value = result.config.model;
+            syncModelPlaceholder(result.config.provider);
+            if (result.config.has_api_key) $('#llm-api-key').value = '••••••••';
+            $('#custom-url-group').hidden = result.config.provider !== 'custom';
+            if (result.config.provider === 'custom') {
+                $('#llm-base-url').value = result.config.base_url;
+            }
+        }
+        setTimeout(() => { setLlmStatus(''); }, 2000);
     } catch (err) {
-        $('#llm-status').textContent = 'Error: ' + err.message;
+        setLlmStatus('Error: ' + err.message, true);
     }
 });
 
@@ -415,9 +653,15 @@ function loadSettings() {
     fetch(`${API_BASE}/llm/config`)
         .then(r => r.json())
         .then(config => {
-            if (config.provider) $('#llm-provider').value = config.provider;
+            if (config.provider) {
+                $('#llm-provider').value = config.provider;
+                syncModelPlaceholder(config.provider);
+            }
             if (config.model) $('#llm-model').value = config.model;
+            if (config.base_url) $('#llm-base-url').value = config.base_url;
+            $('#custom-url-group').hidden = config.provider !== 'custom';
             if (config.has_api_key) $('#llm-api-key').value = '••••••••';
+            renderActiveLlm(config);
         })
         .catch(() => {});
 }

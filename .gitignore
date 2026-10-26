@@ -150,3 +150,52 @@ data/alphabet/*.csv
 
 # Pytest
 .pytest_cache/
+
+# Runtime LLM configuration (may contain an API key)
+data/llm_config.json
+
+# ─────────────────────────────────────────────────────────────
+# Local-only material — never published to the repository
+# ─────────────────────────────────────────────────────────────
+
+# Internal working notes & reports
+FINAL_TEST_REPORT.md
+INVESTIGATION_REPORT.md
+MODIFICATIONS.md
+manual_tests/CHECKLISTE_RAPIDE.md
+
+# Report sources / exports (LaTeX, PDF, figures, build artefacts)
+Rapport_PFA_*/
+docs/RAPPORT_*
+docs/Rapport_Stage_3eme.pdf
+docs/make_report_figures.py
+docs/md2tex.py
+docs/figures/
+
+# Superseded planning documents
+docs/ETAT_ART_ETUDY.md
+docs/RESUME_PROJET.md
+docs/V2_REPORT.md
+05_compare/
+
+# Benchmarks / non-production code kept locally only
+src/continuous_translation/
+src/models/continuous/
+src/models/multi_task_classifier.py
+src/preprocessing/
+scripts/train_continuous.py
+scripts/gen_synthetic_landmarks.py
+scripts/train_multitask.py
+scripts/build_notebook.py
+tests/test_continuous_models.py
+tests/test_temporal_preprocessing.py
+tests/test_v1_adapter.py
+data/continuous/
+models/continuous/
+
+# Backups
+*.bak
+*.bak-*
+
+# Repository screenshots (the only images published under docs/)
+!docs/screenshots/*.png

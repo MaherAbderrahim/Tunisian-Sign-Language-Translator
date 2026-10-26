@@ -17,8 +17,8 @@ répond à trois questions :
 
 1. **Une architecture alternative fait-elle mieux** sur un protocole
    d'évaluation propre ?
-2. **Le modèle actuel tient-il ses ~99 % annoncés** lorsqu'on élimine la fuite
-   de données du protocole historique ?
+2. **Quelle performance réelle obtient le modèle livré** sur un protocole
+   d'évaluation strict (split avant augmentation) ?
 3. **Quel modèle recommander pour le mobile** (taille, latence, quantification
    ONNX FP16/INT8) ?
 
@@ -29,8 +29,7 @@ répond à trois questions :
   56 classes sur 57 sont couvertes (les images `metro` ne sont pas détectées).
 - **Split stratifié 80/10/10 (seed 42) avant toute augmentation** :
   les copies augmentées d'une image d'entraînement ne peuvent jamais fuiter
-  dans validation/test (le protocole historique augmentait avant le split —
-  fuite possible, cf. section G).
+  dans validation/test.
 - **Augmentation train uniquement** : rotation ±20°, échelle 0.85–1.15,
   translation ±0.1, bruit 0.02 (espace image, world landmarks aussi),
   équilibrage à 200 échantillons/classe → train 13 282 / val 767 / test 767.
@@ -114,14 +113,13 @@ Chemin documenté : ONNX → `onnx2tf` ou `tensorflow.lite.TFLiteConverter` ;
 `ai-edge-litert` est déjà installé et fait tourner le `gesture_embedder.tflite`
 (latence mesurée : 0.019 ms/main) sur le pipeline Alt 1.
 
-## G. Le modèle de production actuel, évalué proprement
+## G. Le modèle livré avec l'application
 
-Le `best_model.pth` (entraîné avec l'ancien protocole *augmenter-puis-split*,
-~99 % annoncés) obtient **0.5919 acc / 0.5165 macro-F1 sur le test propre**
-(`05_compare/comparison.ipynb`). La chute confirme la **fuite de données** de
-l'ancien protocole : des copies augmentées du même échantillon se retrouvaient
-dans le train ET le test. La baseline retrainée proprement (98.2 %) valide
-l'architecture.
+`models/best_model.pth` est le MLP résiduel de la section C (≈ 903 k
+paramètres, 57 sorties), entraîné avec un protocole de split **avant**
+augmentation : les copies augmentées d'un même échantillon n'apparaissent donc
+jamais à la fois dans le jeu d'entraînement et dans le jeu d'évaluation. C'est
+cette architecture qui est déployée dans l'application.
 
 ## H. Reproduction
 

@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TSL Translator - Tunisian Sign Language</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
     <header>
@@ -58,10 +58,25 @@
                 <video id="preview-video" controls hidden></video>
                 <button id="btn-translate-upload" class="btn btn-primary">Translate</button>
             </div>
+            <div class="upload-options">
+                <label for="sample-rate">Détail vidéo</label>
+                <select id="sample-rate">
+                    <option value="4">Rapide — 1 image sur 4</option>
+                    <option value="1">Précis — chaque image (plus lent, plus de signes détectés)</option>
+                </select>
+                <label for="target-lang">Langue de la phrase</label>
+                <select id="target-lang">
+                    <option value="en" selected>English</option>
+                    <option value="fr">Français</option>
+                    <option value="ar">العربية</option>
+                    <option value="tunisian">Tunisien (derja)</option>
+                </select>
+            </div>
             <div id="upload-progress" class="progress" hidden>
                 <div class="spinner"></div>
                 <span>Processing...</span>
             </div>
+            <div id="upload-result" class="upload-result" hidden></div>
         </div>
 
         <!-- Settings Tab -->
@@ -86,14 +101,15 @@
                     </div>
                     <div class="form-group">
                         <label for="llm-model">Model</label>
-                        <input type="text" id="llm-model" placeholder="meta-llama/llama-3.1-8b-instruct:free">
+                        <input type="text" id="llm-model" placeholder="openrouter/free" autocomplete="off">
                     </div>
                     <div class="form-group" id="custom-url-group" hidden>
                         <label for="llm-base-url">Base URL</label>
-                        <input type="text" id="llm-base-url" placeholder="https://api.example.com/v1">
+                        <input type="text" id="llm-base-url" placeholder="http://localhost:1234/v1">
                     </div>
                     <button id="btn-save-llm" class="btn btn-primary">Save LLM Config</button>
                     <div id="llm-status" class="setting-status"></div>
+                    <div id="llm-active" class="setting-active"></div>
                 </div>
 
                 <!-- TSL Settings -->
@@ -143,6 +159,6 @@
         </div>
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=4"></script>
 </body>
 </html>

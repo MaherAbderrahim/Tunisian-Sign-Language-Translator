@@ -430,8 +430,10 @@ def test_translator_init():
     assert t.model is not None, "Sign model not loaded"
     assert t.spell_model is not None, "Spell model not loaded"
     assert t.llm_corrector is not None, "LLM corrector not initialized"
-    assert t.spell_assembler is not None, "Spell assembler not initialized"
-    assert t.mode_controller is not None, "Mode controller not initialized"
+    # Per-client state (session isolation refactor): spell/mode live in the session
+    state = t.get_session()
+    assert state.spell_assembler is not None, "Spell assembler not initialized"
+    assert state.mode_controller is not None, "Mode controller not initialized"
     assert t.alphabet is not None, "Alphabet not initialized"
 
     # Verify alphabet size matches model
